@@ -3,6 +3,13 @@
    --------------------------------------------------------------------------
    Reads tokens.css; defines no colours of its own.
 
+   THE `hidden` ATTRIBUTE IS AUTHORITATIVE. This has to come before any display
+   rule below, and it is why the app can toggle whole screens by setting one
+   attribute. Without it, `.screen--home { display: flex }` outranks the
+   browser's own `[hidden] { display: none }` — author styles beat user-agent
+   styles — and every screen on the page renders at once, stacked on top of one
+   another.
+
    Two rules hold throughout, and both exist so that Arabic costs nothing:
 
      1. LAYOUT USES LOGICAL PROPERTIES ONLY. `margin-inline-start` rather than
@@ -14,6 +21,12 @@
         width from a physical edge, so a translated string that is 30% longer
         in Arabic reflows instead of overflowing.
    ========================================================================== */
+
+/* The whole app shows and hides screens by toggling this one attribute, so it
+   must win against every `display` declared below. */
+[hidden] {
+  display: none !important;
+}
 
 /* ==========================================================================
    Utilities
