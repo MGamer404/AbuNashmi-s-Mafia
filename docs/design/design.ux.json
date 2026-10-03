@@ -1,0 +1,246 @@
+{
+  "title": "AbuNashmi's Mafia — UI/UX, Card Metaphor & Bilingual RTL Design",
+  "summary": "A mobile-first, static-file design for 5–20 phones around a table: five screens (Home, Lobby, Deal, Game, End) driven by a small view FSM, with the dealt card as the emotional centrepiece. The card is a CSS 3D flip (preserve-3d + backface-visibility) that only ever flips face-up on its owner's device, with a full non-animated path under prefers-reduced-motion. The Game screen is one renderer that adapts to four role payloads and to the two moderated sub-styles, while a separate moderator panel gets the roster, phase-advance controls, and manual-result grid. Arabic/RTL is achieved with a single stylesheet using logical properties plus an html[dir] flip, <bdi> isolation for mixed-script names, and Intl-based numerals/plurals; dictionaries are local ES modules loaded before first paint so there is no untranslated flash. All secret data is rendered only from host-pushed private payloads — the UI itself never holds, infers, or broadcasts secrets.",
+  "decisions": [
+    {
+      "topic": "Screen inventory & navigation flow",
+      "choice": "Five screens managed by a tiny view FSM: Home -> Lobby -> Deal -> Game -> End, plus two overlays (role sheet, moderator panel). Home = create/join + language toggle. Lobby = player chips, room code w/ copy+share, per-seat connection dots, host-only config sheet, Deal button (disabled <5). Deal = centre deck flies cards to slots, tap-own-to-flip. Game = table + phase banner + timer ring + role action panel + chat drawer. End = win banner, full role reveal, Play again (same room, new deal).",
+      "rationale": "A flat linear flow matches a party game's real sequence and is trivially recoverable from a reconnect snapshot; overlays keep chat and the role card reachable from every game moment without leaving the screen.",
+      "rejected": "Tab-based persistent nav and hash routing — unnecessary state, and hash churn breaks iOS Safari back-gesture expectations for a single-page app."
+    },
+    {
+      "topic": "The card: 3D flip mechanics",
+      "choice": ".card{perspective:1000px} > .card__inner{transform-style:preserve-3d;transition:transform .5s cubic-bezier(.2,.8,.2,1)} ; faces use backface-visibility:hidden ; face-up = .card__inner rotateY(180deg). Back face is identical for all players (no tells); front face = role art + name + one-line description.",
+      "rationale": "Hardware-accelerated, no layout thrash, works on iOS Safari and Android Chrome, and the shared back prevents accidental role leakage via a distinct card-back design.",
+      "rejected": "Canvas/WebGL card or sprite flip — heavier, more battery, no accessibility tree, and pointless for one small element."
+    },
+    {
+      "topic": "The deal animation",
+      "choice": "FLIP technique: render all card slots first (face-down), measure their rects, then absolutely-position each card at the shared deck origin and animate translate/rotate/scale into its slot with the Web Animations API, 280ms travel + 80ms stagger per seat, easing ease-out. Owner's card ends under the tap prompt.",
+      "rationale": "FLIP gives a real 'cards fly from centre' motion with correct final layout and no per-frame layout cost; Web Animations is cancellable on reconnect.",
+      "rejected": "Animating left/top per card — forces layout every frame and janks on 20 cards."
+    },
+    {
+      "topic": "Reduced-motion & non-visual card path",
+      "choice": "Under @media (prefers-reduced-motion:reduce): skip the fly-in (cards fade in over 120ms), flip is instant (transition:none), and the role is also exposed as plain text in the role sheet + an aria-live announcement. The card is a <button> labelled 'Reveal your role'; after flip the role text is in the accessibility tree.",
+      "rationale": "Card imagery must never be the only carrier of the role; motion-sensitive and screen-reader users get the same information instantly.",
+      "rejected": "Keeping a shorter animation under reduced-motion — still motion, still a hazard for vestibular users."
+    },
+    {
+      "topic": "On-device card privacy / shoulder-surfing",
+      "choice": "Card starts face-down; default interaction is hold-to-reveal (pointerdown reveals, pointerup hides) with a tap-to-latch alternative; auto-hide after 3s. Flip state is LOCAL UI state, never sent over the wire, and the role sheet can always re-reveal. No secret data is written to a URL or shared state.",
+      "rationale": "The tabletop use case means neighbours can glance at your screen; hold-to-reveal makes casual leaking hard without hurting usability.",
+      "rejected": "A permanently face-up card on screen — invites shoulder-surfing and defeats the physical card metaphor."
+    },
+    {
+      "topic": "Table layout for 5–20 players on a 390px phone",
+      "choice": "Tile grid, not a ring: CSS grid repeat(auto-fill, minmax(82px,1fr)) -> 4 tiles/row at 390px, ~88px each, 44px+ avatar, self tile ordered first via CSS order. Ring layout only offered as an optional toggle for <=8 players. Tiles: initials avatar (colour from name hash), name (bidi-isolated, 1-line ellipsis), alive/dead state (desaturate + overlay), vote marker (border highlight for 'you voted for'), tally bubble.",
+      "rationale": "A ring cannot legibly hold 20 tiles at phone width; a grid stays readable, scrollable, and thumb-friendly, while the optional ring preserves the table feel for small games.",
+      "rejected": "Force a circular table at all sizes — illegible names and unreachable edge targets at 20 players."
+    },
+    {
+      "topic": "Vote tally visualisation",
+      "choice": "Three layers: per-tile count bubble, a horizontal tally bar under the phase banner while voting (players ranked, leader highlighted), and a centre summary 'N votes - <name>' with the eliminated name struck when resolved. Ties render as a distinct 'no majority' state.",
+      "rationale": "Per-tile + aggregate covers both 'who am I voting for' and 'where is the room going' without crowding the tiles.",
+      "rejected": "Only a per-tile count — hides the aggregate race that drives the drama."
+    },
+    {
+      "topic": "Role-specific night UI, driven by private payloads",
+      "choice": "One action panel dispatches on (phase.step, myRole): Villager = closed-eyes waiting card; Mafia = partner list + shared target picker + consensus hint ('you and 1 other picked X') + mafia chat; Doctor = save picker over alive+self, previous target disabled with reason; Detective = investigate picker, then a private result sheet and a persistent local findings log re-openable from the role sheet. Panels only render data the host explicitly pushed to this peer.",
+      "rationale": "The UI must assume it does not have secret data rather than filtering it; rendering only pushed private payloads keeps the hostile-client boundary honest.",
+      "rejected": "Sending the full game state to every client and hiding fields in the DOM — a cheating player reads it in devtools."
+    },
+    {
+      "topic": "Two moderated sub-styles on the identical player Game screen",
+      "choice": "The player renderer reads config.actionMode. 'players act' shows pickers and submits private picks; the moderator sees incoming picks tallied. 'mod enters everything' hides all pickers (replaced by 'Wait for the moderator') and the moderator types outcomes into a manual grid. Switching is a segmented control broadcast live; clients re-render in place, no navigation.",
+      "rationale": "One renderer, one state shape, no divergent screens; live switching is a config event, not a mode reload, so it works mid-phase.",
+      "rejected": "Two separate player screens for the sub-styles — doubles maintenance and risks divergent bugs."
+    },
+    {
+      "topic": "Moderator control panel",
+      "choice": "A distinct ModeratorPanel module (not a card-bearing player): roleRoster (every name -> role + alive), phaseControls (contextual: 'Mafia, wake up' / 'Doctor, wake up' / 'Day begins' / 'Call the vote' / 'Next night'), manualEntryGrid (tap a player, mark Killed/Saved/Investigated + vote tally), and a sticky modeToggle. Broadcast-only announcement composer pinned to top. Designed mobile-first at 390px (the moderator is also on a phone), with a wide-screen two-column layout.",
+      "rationale": "The moderator needs at-a-glance omniscience and one-handed operation while narrating aloud; keeping it a separate module keeps player clients free of any role data.",
+      "rejected": "Giving the moderator the normal player screen with extra controls — accidentally sends all-role data to a device that could be a hostile player's."
+    },
+    {
+      "topic": "Arabic/RTL with a single stylesheet",
+      "choice": "Use CSS logical properties exclusively for semantic layout: margin-inline, padding-inline, inset-inline-start/end, border-inline-start, text-align:start/end. setLocale() sets <html dir='rtl' lang='ar'>. The only physical-property rules live in a small rtl.css with targeted mirrors (e.g., chevron icons get [dir=rtl] .chevron{transform:scaleX(-1)}). Do NOT mirror the clock/timer ring or numerals.",
+      "rationale": "Logical properties make the browser flip the whole layout from the dir attribute, so there is one stylesheet and no risk of the two drifting apart.",
+      "rejected": "A paralleled rtl.css stylesheet via [dir=rtl] overrides for every rule — guaranteed to rot and double the CSS surface."
+    },
+    {
+      "topic": "Mixed-direction text (bidi isolation)",
+      "choice": "Every user-generated string (player names, chat author, chat body) is wrapped in <bdi> or given unicode-bidi:isolate; all inputs use dir='auto'. Static UI chrome takes the document direction. Chat bubbles align to inline-start for others and inline-end for self, independent of message language.",
+      "rationale": "<bdi>/isolate stops an English name inside an Arabic sentence (or vice versa) from re-ordering surrounding punctuation and digits — the classic bidi corruption.",
+      "rejected": "Relying on the ambient dir for user text — produces scrambled parentheses, dates, and trailing punctuation in mixed content."
+    },
+    {
+      "topic": "Numerals policy",
+      "choice": "All numbers formatted through Intl.NumberFormat(locale) with a default numbering system of Western digits for both locales (users overwhelmingly expect 3-2-1 in Arabic game UIs), exposed as a config toggle offering ar-u-nu-arab (٠١٢٣) for those who prefer it. Timer digits use tabular-nums and a fixed-width digit box so the ring never jitters when the system changes.",
+      "rationale": "One consistent, non-jittering numeral rendering with an opt-in for Arabic-Indic; fixed digit width avoids layout shift at the 1s tick.",
+      "rejected": "Auto-switching numerals by locale with proportional digits — causes visible width jitter every second in the timer."
+    },
+    {
+      "topic": "i18n mechanics and no-FOUC boot",
+      "choice": "Flat dot-key dictionaries as local ES modules (i18n/en.js, i18n/ar.js) imported eagerly at boot; index.html ships with <html class='i18n-loading'> that hides #app until setLocale()+first render removes it. t(key, vars, count) does {name} interpolation; pluralisation delegates to Intl.PluralRules and looks up key_zero/one/two/few/many/other. Default locale from localStorage else navigator.language, resolved against the two supported locales.",
+      "rationale": "Local module imports resolve instantly with no network round-trip, so gating one render behind them eliminates the flash of untranslated content without a fetch race.",
+      "rejected": "Fetching JSON dictionaries at runtime on first paint — produces the exact flash-of-untranslated-content we must avoid."
+    },
+    {
+      "topic": "Chat channels and the dead-chat question",
+      "choice": "Channels: lobby (all), day (all living), night-mafia (mafia only), moderator broadcast (all, styled as system banner). Live dead chat is OFF by default and only available as a host config flag; even then it is strictly dead-to-dead and never reaches living players. Dead players default to a public-spectator board plus read-only view, and are muted from day chat. The host routes messages per-peer; the client renders only what it receives.",
+      "rationale": "A dead player who has seen the reveal can relay role information, so a live dead channel is an information leak that can decide the game; defaulting it off preserves classic Mafia silence after death.",
+      "rejected": "Unconditional dead chat — one dead spectator typing 'it's Ahmed' to a living player's phone breaks the game."
+    },
+    {
+      "topic": "Turn & event feedback",
+      "choice": "Your-turn = full-screen inset edge glow in the role/phase colour + banner text ('Your turn: choose someone to save') + aria-live polite announcement + optional short haptic + chime. A persistent mute toggle (localStorage) gates all audio; sounds are Web Audio synthesized (deal riffle, flip, night-fall, elimination, daybreak, vote tick, win/lose) and the AudioContext is unlocked on the first tap. iOS has no navigator.vibrate, so haptics degrade silently.",
+      "rationale": "Multiple redundant cues cover the noisy-table reality and accessibility needs; synthesis keeps the repo asset-free and the static bundle tiny.",
+      "rejected": "Audio-only turn signalling — inaudible across a table and blocked by autoplay policies until a gesture."
+    },
+    {
+      "topic": "AFK and disconnect handling",
+      "choice": "Host tracks a heartbeat; after ~20s a tile shows an idle 'zzz' badge and disabled styling. On timer expiry an AFK player auto-abstains (their night action is skipped; in automated mode only the Mafia pick is auto-randomised to keep the game moving). Disconnected players keep their seat and reserved card; a reconnect overlay offers resume (peer id == room code), and the host replays the last private payload so the card face-down state is re-shown.",
+      "rationale": "Party-table players wander off; abstain-by-default preserves fairness while a narrow auto-randomisation only for Mafia avoids stalling the win condition.",
+      "rejected": "Auto-submitting a random action for every AFK role — silently random Doctors/Detectives corrupt game outcomes."
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "i18n dictionary shape",
+      "signature": "// i18n/en.js | i18n/ar.js\nexport default {\n  'app.title': \"AbuNashmi's Mafia\",\n  'home.create': 'Create room',\n  'lobby.player_count_one': '{n} player in the room',\n  'lobby.player_count_other': '{n} players in the room',\n  'night.mafia.choose_target': 'Choose tonight’s victim',\n  'night.mafia.consensus': 'You and {others} {others_one:other} picked {name}'\n} satisfies Record<string,string>",
+      "purpose": "Flat, dot-namespaced key/value maps loaded as static ES modules; Arabic supplies the full set of Intl.PluralRules categories (zero/one/two/few/many/other), English uses one/other."
+    },
+    {
+      "name": "t()",
+      "signature": "function t(key: string, vars?: Record<string,string|number>, count?: number): string",
+      "purpose": "Look up a key, select the plural form via Intl.PluralRules(locale).select(count) when count is given (key_<category>), and interpolate {token} vars. Falls back to the en value, then to the key itself."
+    },
+    {
+      "name": "setLocale()",
+      "signature": "function setLocale(locale: 'en'|'ar'): void",
+      "purpose": "Sets localStorage, and writes document.documentElement.lang and dir ('ltr'/'rtl'), updates --dir multiplier, re-renders active screen, and removes the i18n-loading gate class."
+    },
+    {
+      "name": "renderCard() / flipCard()",
+      "signature": "function renderCard(el: HTMLElement, opts: {role: Role|null, faceUp: boolean, locale: string}): void\nfunction flipCard(el: HTMLElement, faceUp: boolean, opts: {reducedMotion: boolean}): void",
+      "purpose": "Builds the 3D card DOM (identical back, role front); flipCard toggles rotateY(180deg) and skips the transition when reduced-motion is set. Card flip state lives in local UI state, never the network store."
+    },
+    {
+      "name": "layoutTable()",
+      "signature": "function layoutTable(container: HTMLElement, players: PlayerTile[], opts: {cols?: number, ring?: boolean, selfId: string}): void",
+      "purpose": "Renders the tile grid (auto-fill minmax(82px,1fr)) or optional ring; pins the self tile first, and applies alive/dead/voted/idle visual state classes."
+    },
+    {
+      "name": "renderTimerRing()",
+      "signature": "function renderTimerRing(el: HTMLElement, opts: {deadlineTs: number, clockOffset: number, numberingSystem: string, onExpire?: () => void}): () => void",
+      "purpose": "Drives an SVG stroke-dashoffset ring from the host deadline plus measured clock offset; returns a disposer. Uses tabular fixed-width digits and fires aria-live announcements at 10s/5s."
+    },
+    {
+      "name": "renderActionPanel()",
+      "signature": "function renderActionPanel(root: HTMLElement, ctx: {step: 'mafia'|'doctor'|'detective'|'vote', phase: 'night'|'day', actionMode: 'players'|'mod', me: PrivateRolePayload, board: PublicBoard, onSubmit: (action) => void}): void",
+      "purpose": "Single role/phase-driven action surface for players; renders waiting states in 'mod enters everything' mode and pickers in 'players act' mode. Consumes only host-pushed private payloads."
+    },
+    {
+      "name": "renderModeratorPanel()",
+      "signature": "function renderModeratorPanel(root: HTMLElement, ctx: {roster: {id,name,role,alive}[], phase: Phase, actionMode: 'players'|'mod', picks: PrivatePick[], onAdvance: (step) => void, onManualResult: (result) => void, onSetMode: (mode) => void, onAnnounce: (text) => void}): void",
+      "purpose": "The moderator-only screen: full role roster, contextual phase-advance buttons, manual kill/save/investigate + tally entry grid, and the sticky players-act <-> mod-enters toggle."
+    },
+    {
+      "name": "Chat message + channel shape",
+      "signature": "{ type: 'chat', channel: 'lobby'|'day'|'mafia'|'mod'|'dead', authorId: string, text: string, ts: number }\n// host routes each message only to peers allowed on that channel",
+      "purpose": "Uniform chat wire shape; channel membership is enforced by the host before delivery, so the client renders only received messages and never filters secrets itself."
+    },
+    {
+      "name": "Host -> client payloads (UI-relevant)",
+      "signature": "{ type:'private_role', role:'villager'|'mafia'|'doctor'|'detective', partners?: {id,name}[], findings?: Finding[] }\n{ type:'private_result', kind:'investigate', targetId, name, isMafia:boolean }\n{ type:'phase', phase:'lobby'|'night'|'day'|'end', step:'mafia'|'doctor'|'detective'|'vote'|null, actorRole?: Role, deadlineTs?: number, actionMode:'players'|'mod' }\n{ type:'public_board', players:[{id,name,alive,idle,votes}], tally:{byId:Record<string,number>, leaderId?:string|null}, announcement?:string }\n{ type:'config', mode:'auto'|'moderated', actionMode, noKillFirstNight, tieRule:'no_elim'|'runoff', deadChat:boolean }",
+      "purpose": "The UI's complete input contract. Every screen/panel is a pure function of these plus local UI state; nothing secret is ever inferred client-side."
+    },
+    {
+      "name": "Audio / haptics facade",
+      "signature": "sfx.play(cue: 'deal'|'flip'|'night'|'elimination'|'daybreak'|'vote'|'win'|'lose', opts?:{muted:boolean}): void\nhaptics.buzz(pattern: 'turn'|'elimination'|'warn'): void\nsfx.unlockOnGesture(): void",
+      "purpose": "Synthesized Web Audio cues gated by a persisted mute flag, plus a vibrate() wrapper that silently no-ops on iOS; unlock is called from the join/create tap."
+    },
+    {
+      "name": "Module boundaries",
+      "signature": "ui/router.js (go(screen,params))\nui/screens/{home,lobby,deal,game,end}.js\nui/components/{card,playerTile,timerRing,phaseBanner,tally,actionPanel,chatDrawer,roleSheet,moderatorPanel}.js\ni18n/{i18n.js,en.js,ar.js}\nstyles/{tokens,layout,card,rtl,a11y}.css",
+      "purpose": "Screens own layout and compose pure components; the store is a small event emitter whose state changes re-render the active screen. Card flip and sheet-open live in local component state so global re-renders never re-flip a revealed card."
+    }
+  ],
+  "edgeCases": [
+    {
+      "scenario": "prefers-reduced-motion is set",
+      "handling": "Deal becomes a 120ms fade, flip is instant, and the role is additionally written to an aria-live region and the role sheet so no information depends on motion."
+    },
+    {
+      "scenario": "Reconnect mid-deal or after reconnect",
+      "handling": "Host replays the last private_role payload; the client re-renders the card face-down and re-arms the tap/hold prompt. No replay of the fly-in animation."
+    },
+    {
+      "scenario": "Timer deadline is in the past on a laggy client",
+      "handling": "Ring clamps to 0 via the measured clockOffset (ping-derived), shows 'time's up', and the pending pick auto-submits if selected else abstains, with a toast."
+    },
+    {
+      "scenario": "A 20-character Arabic name in an English chat line",
+      "handling": "Name wrapped in <bdi> / unicode-bidi:isolate; input uses dir='auto'; list names and message bodies never affect surrounding punctuation."
+    },
+    {
+      "scenario": "Digit numbering toggled mid-game",
+      "handling": "Timer re-renders through Intl.NumberFormat and keeps a fixed-width tabular-nums box, so the ring does not reflow between updates."
+    },
+    {
+      "scenario": "Doctor selects the same target two nights running",
+      "handling": "Tile is disabled with a visible reason ('saved last night'); host also rejects if a stale pick arrives."
+    },
+    {
+      "scenario": "Detective has no valid targets (all others dead)",
+      "handling": "Investigate picker shows an empty state and an explicit Skip action; result is not fabricated."
+    },
+    {
+      "scenario": "Mafia do not agree before the deadline",
+      "handling": "Host resolves by plurality then random; the UI shows 'No consensus reached' before the night outcome is announced."
+    },
+    {
+      "scenario": "Vote ties",
+      "handling": "The tally component renders a 'no majority' state; overlay follows config.tieRule (no elimination, or runoff banner and a second vote round)."
+    },
+    {
+      "scenario": "Host disconnects",
+      "handling": "All clients show a reconnect overlay; because the peer id equals the room code, the host rejoins the same room and resumes from a localStorage snapshot, replaying phase + private payloads."
+    },
+    {
+      "scenario": "A player is AFK / idle",
+      "handling": "After ~20s a 'zzz' badge appears, actions auto-abstain on timeout, and a disconnected seat stays reserved with a distinct style until reconnect."
+    },
+    {
+      "scenario": "Eliminated player's in-flight vote or night pick arrives",
+      "handling": "Host drops it; the tile clears any vote marker and the dead styling takes over. Dead players get the spectator board only."
+    },
+    {
+      "scenario": "Moderator makes a typo/error in manual entry",
+      "handling": "Manual kills/saves require a confirm step showing the chosen name and role before broadcast, with an undo for the immediately previous result."
+    },
+    {
+      "scenario": "Moderator toggles players-act <-> mod-enters mid-phase",
+      "handling": "Clients re-render the action panel in place from the config event; any already-submitted private picks are kept and shown to the moderator, not discarded."
+    },
+    {
+      "scenario": "iOS audio locked until a gesture",
+      "handling": "AudioContext is created/unlocked on the create/join tap; if still locked, sounds are skipped and only visual/haptic cues fire."
+    },
+    {
+      "scenario": "Bright table / low contrast",
+      "handling": "Contrast targets >=4.5:1 text and >=3:1 UI, phase colours are backed by text labels and icons, never colour alone (also covers colour-blind players)."
+    }
+  ],
+  "risks": [
+    "Cross-cutting and critical: the UI cannot guarantee secrecy. A cheating player can read every value the host sends them in devtools. The card being face-down is cosmetic; if the host ever sends all roles or the full board, nothing in the UI can hide it. The UI must be designed to render only pushed private payloads, and the host must redact per-peer — this must be verified at the transport layer, not assumed from the screens.",
+    "PeerJS public cloud broker is a single point of failure for signalling; a broker outage blocks all rooms even though the WebRTC data path is P2P. No UI fix; needs a graceful 'can't reach the matchmaking service' state.",
+    "3D transforms and @property / modern CSS may behave differently on older iOS Safari; the design should feature-detect and fall back to a 2D flip rather than assuming support.",
+    "Accessibility: the 3D card, timer ring, and animated deal need real non-visual equivalents (aria-live, text role readout) or screen-reader users are excluded.",
+    "Text scaling / large dynamic type can overflow the 4-column tile grid and the timer ring; layout must tolerate wrapping and clamping.",
+    "Arabic system fonts and Web Audio synthesis vary by platform; both sound and Arabic glyph quality are not fully controllable from static files.",
+    "Chat has no moderation, rate-limiting, or reporting; on a deliberately hostile-client model, a player can spam or spoof names, and the moderator announcement channel is only as trustworthy as the host device.",
+    "localStorage snapshots (ratio of room state, locale, mute) are readable on a shared household device; they must never contain another player's secret role, and locale/mute are the only intended persisted values."
+  ]
+}

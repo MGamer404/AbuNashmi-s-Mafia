@@ -1,0 +1,259 @@
+{
+  "title": "Peer Networking & Room Lifecycle — AbuNashmi's Mafia",
+  "summary": "Host browser is the authoritative server; guests form a pure star over PeerJS/WebRTC. A 6-character Crockford-Base32 room code is normalized and deterministically mapped to a namespaced PeerJS id (anm-<code>); only the host listens on a derived id, guests use random ids so collisions are host-only and resolved by re-rolling. State moves as small, per-recipient-redacted full snapshots (idempotent, self-healing on reconnect) while lossy ephemeral events drive animations; secrets never leave the host. Identity reconnection uses a 128-bit player token held by the host, with a grace window so a locked phone rebinds to its slot. Host disconnect is handled by freeze + a 2-minute reconnect window backed by localStorage persistence — host promotion is rejected because it would violate the hostile-client secrecy constraint. Automated-mode timers are host-absolute deadlines corrected on the guest by an NTP-style clock offset and always recomputed on tick/visibilitychange so tab throttling self-corrects.",
+  "decisions": [
+    {
+      "topic": "Room code → PeerJS id derivation",
+      "choice": "Code is 6 chars of Crockford Base32 (alphabet 0123456789ABCDEFGHJKMNPQRSTVWXYZ; excludes I,L,O,U). normalizeCode() uppercases, strips spaces/dashes, maps I,L→1 and O→0 on input. Peer id is NOT the bare code: derivePeerId(code) = 'anm-' + code.",
+      "rationale": "The public PeerJS cloud broker has a global id namespace shared with unrelated apps; a bare 6-char code would collide with strangers' apps. A fixed 'anm-' prefix namespaces us. Crockford removes the 0/O and 1/I/l confusables and its decode rules let a human mistyping O for 0 still resolve.",
+      "rejected": "Raw code as the PeerJS id (collides across apps and is case-fragile); random case-sensitive ids (unshareable/typable); base62 (reintroduces 0/O, l/1 confusion)."
+    },
+    {
+      "topic": "Host id collision handling ('unavailable-id')",
+      "choice": "createHost() tries derivePeerId(code); on PeerJS error type 'unavailable-id' it discards the code, generates a fresh one, and retries up to 5 times with 500ms*2^n jittered backoff. Guests never listen on an id, so they can never trigger it.",
+      "rationale": "unavailable-id means either a rare broker collision or a stale host socket still holding the id. Re-rolling is instant and user-visible (the shown code changes before anyone joins). Retrying the same id can hang behind a stale lease.",
+      "rejected": "Retrying the same id (wedged behind stale lease); surfacing a raw error to a party host (bad UX); longer codes (harder to read aloud)."
+    },
+    {
+      "topic": "Connection topology",
+      "choice": "Pure star: every guest holds exactly one RTCPeerConnection/DataChannel to the host. No guest-to-guest channels. Host is a 'game-state relay' (accepts actions, broadcasts redacted snapshots) but never a dumb pipe between guests. Confirmed viable at 20 players.",
+      "rationale": "20 channels on the host is one DTLS session per guest — heavy but proven on mobile browsers; Mafia messages are tiny (<10KB). A mesh would need n(n-1)/2 = 190 channels at n=20, killing phone CPUs and battery. Host fan-out of small snapshots is cheap; only join-time is stressed by 20 simultaneous handshakes, mitigated because players join from a lobby over minutes.",
+      "rejected": "Full mesh (O(n^2) channels, unusable); guest relaying (any guest would need all secrets — violates secrecy); a signalling/media server (no server allowed)."
+    },
+    {
+      "topic": "Snapshot vs delta",
+      "choice": "Full per-recipient REDACTED snapshot is the single source of truth and is re-sent on every state transition (join, phase change, vote tally, death). Ephemeral 'event' messages (toasts, deal/flip animations, chat deltas) ride alongside but are explicitly LOSSY. Client keeps the highest seq snapshot and ignores older ones.",
+      "rationale": "Total game state is <10KB, so full snapshots are cheap. Snapshots are idempotent and self-healing: any lost message or reconnect is fixed by the next snapshot with zero reconciliation code. Deltas would require ordering, acks, and gap-recovery — all failure modes that surface exactly when WiFi is flaky, which the spec forbids.",
+      "rejected": "Pure delta/event-sourcing (needs ack + reorder + gap protocol; divergence on packet loss); JSON-Patch/minified deltas (complexity not justified at <10KB)."
+    },
+    {
+      "topic": "Protocol envelope",
+      "choice": "Every message is {v:1, type, seq, ts, id, payload}. seq = per-sender monotonic counter; ts = sender epoch ms (used for clock sync too); id = short message id for dedup/ack of actions. Unknown 'type' or v>1 is ignored, never fatal.",
+      "rationale": "Versioned envelope allows additive protocol growth without breaking deployed clients. ts doubles as the clock-sync probe payload. Per-sender seq gives free stale-snapshot rejection and duplicate-action suppression.",
+      "rejected": "Untyped bare payloads (no versioning, no stale detection); protobuf/binary (a build step, forbidden)."
+    },
+    {
+      "topic": "Secrecy boundary — redaction at send time",
+      "choice": "The host holds the only complete state. redactedSnapshotFor(playerId) is computed per recipient at send time: a player sees only public state + their own role + (if Mafia) their living teammates + (if Detective) their own investigation results. Moderator token receives the unredacted snapshot. No secret ever appears in any guest-bound message, so devtools on a guest is useless.",
+      "rationale": "This is the spec's CRITICAL constraint. A hostile client can only ever see bytes sent to it; if the server never serializes secrets to that peer, cheating by devtools is impossible by construction — not merely obfuscated.",
+      "rejected": "Sending full state and hiding secrets in the UI (trivially defeated by devtools); encrypting secrets with a key the client holds (key is readable)."
+    },
+    {
+      "topic": "Join handshake and identity token",
+      "choice": "Guest→Host hello{v, name, clientNonce, rejoin?:{playerId, token}}; Host→Guest welcome{playerId, token, roomCode, hostEpoch, config, snapshot} on success, or error{code}. The host generates playerId and a 128-bit crypto-random playerToken, stores them in the slot, and never broadcasts any token. Guest persists {playerId, token} in sessionStorage keyed by roomCode.",
+      "rationale": "A token issued by the server and never exposed to other peers lets a returning phone prove it is the same player without a password, and stops a guest from spoofing another player's identity (they have no way to learn another's token). sessionStorage survives a tab reload/lock without persisting across unrelated sessions.",
+      "rejected": "localStorage (token lingers forever, another person on the same device inherits the seat); no token / name-only identity (anyone can claim any seat)."
+    },
+    {
+      "topic": "Reconnection and slot lifecycle",
+      "choice": "Slot states: connected → unresponsive (no traffic 15s) → disconnected (30s; grace timer starts) → expired. Grace = 90s in lobby (then removed) and the full remaining game in-game (slot kept but inert so win-count math is stable). On valid rejoin the host transfers the new DataChannel into the existing slot, cancels the grace timer, and pushes a fresh snapshot. A second live connection for a slot evicts the older channel with a sessionReplaced notice.",
+      "rationale": "Holding an in-game role open keeps role-count and win-condition invariants intact even if someone drops; forcing a mid-game role to be reassigned would corrupt balance. Eviction prevents two-tab token theft from leaving a zombie.",
+      "rejected": "Reassigning the dropped player's role (breaks balance and leaks role count); unlimited hold (ghost players stall the game); instant removal (punishes a 5-second lock)."
+    },
+    {
+      "topic": "Host disconnect handling",
+      "choice": "Freeze + reconnect window: host persists full state to localStorage on every transition; guests that lose the host enter a 'Reconnecting to host…' overlay and retry the host peer id with jittered backoff for 120s. If the host returns (including after an accidental reload, restoring from localStorage) the game resumes; if 120s elapse, guests show 'Host left' and return home. Host requests navigator.wakeLock during play.",
+      "rationale": "Best fit for a casual party: host phone locking or a momentary WiFi blip is the common failure and is recovered invisibly. Promotion is impossible here: no guest holds the authoritative secrets (by design), so no guest can become a trustworthy server without first shipping them secrets — which breaks the secrecy constraint. Ending immediately is the cheapest option but punishes the single most common transient failure.",
+      "rejected": "Promote a new host from a guest (would require broadcasting full secret state — fatal; plus P2P re-addressing chaos); immediate game end (hostile to a 5s blip)."
+    },
+    {
+      "topic": "Clock/timer authority (AUTOMATED mode)",
+      "choice": "Only the host advances phases. Each phase carries an absolute host deadline deadlineAt (host epoch ms) inside the snapshot. Guests estimate clockOffset via NTP-style samples from ping/pong — observe(t0, tHost, t3) → offset=((t0? host pairing)) — smoothed with EWMA, and render remaining = deadlineAt - (Date.now() + offset). Guests recompute on every tick AND on visibilitychange/focus, never accumulate a counter. Host's own late timer self-corrects the same way.",
+      "rationale": "Absolute deadlines make a throttled/backgrounded tab harmless: when it wakes, the derived remaining is instantly correct with no drift. Only the host needs foreground reliability, and wakeLock plus visibilitychange recovery covers it. Guests being wrong on a countdown is cosmetic since they cannot advance the phase.",
+      "rejected": "Host broadcasting relative countdown ticks (drift accumulates; throttling corrupts); guest-local timers (device clocks untrusted); relying on setInterval accumulation (breaks under background throttling)."
+    },
+    {
+      "topic": "Heartbeats and dead-peer detection",
+      "choice": "Guests send ping{t0} every 5s; host replies pong{t0, tHost} and records lastSeen. Host flags unresponsive at 15s, disconnected at 30s (start grace). Host also emits ping so guests detect host silence: show 'connection unstable' at 20s, attempt reconnect at 35s. Any inbound message refreshes lastSeen. Channel onclose / iceState failed triggers immediate reconnect.",
+      "rationale": "App-level liveness is needed for UI truth ('📶 reconnecting' on the board) even though SCTP has its own heartbeat, because we must distinguish laggy-but-alive from gone. 5/15/30 gives ~3 missed beats before declaring a problem — tolerant of a flaky phone without false alarms.",
+      "rejected": "No heartbeat (dead players look alive, votes stall); 1s pings (battery/radio churn on phones); relying solely on channel close events (fire too slowly/erratically on mobile network handoff)."
+    },
+    {
+      "topic": "Late joiner policy",
+      "choice": "Lobby admission is open (up to 20). Once the game starts, a new peer is admitted as a SPECTATOR: receives public snapshot + chat, no card, no actions. Reconnecting existing players always bypasses this via their token. Config flag allowMidGameJoin can additionally permit spectator-as-player later, but default is spectate.",
+      "rationale": "Dealing a new role mid-game breaks the role-count invariant, unbalances win conditions, and would force re-redaction of what the new player may know. Spectating is socially harmless and keeps the party together.",
+      "rejected": "Dealing a random role mid-game (balance/role-count corruption); hard rejection (a late friend is locked out entirely)."
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "generateRoomCode",
+      "signature": "function generateRoomCode(): string  // 6 chars from Crockford Base32, crypto-random, rejection-sampled",
+      "purpose": "Create the human-shareable code; ~1.07e9 space."
+    },
+    {
+      "name": "normalizeCode",
+      "signature": "function normalizeCode(input: string): string | null  // upper, strip ^[A-Za-z0-9]-, map I/L->1, O->0; null if not 6 valid symbols",
+      "purpose": "Make typed codes forgiving of case, spacing and 0/O, 1/I/l confusion."
+    },
+    {
+      "name": "derivePeerId",
+      "signature": "function derivePeerId(code: string): string  // 'anm-' + normalizeCode(code)",
+      "purpose": "Namespace the code inside PeerJS's global broker id space."
+    },
+    {
+      "name": "createHost",
+      "signature": "async function createHost(opts: {playerName?: string, mode: 'auto'|'moderated', config: GameConfig, onPlayerMessage, onLog}): Promise<HostSession>",
+      "purpose": "Open the listening peer (with unavailable-id re-roll loop up to 5x) and return the authoritative session object."
+    },
+    {
+      "name": "joinRoom",
+      "signature": "async function joinRoom(opts: {code: string, playerName: string, rejoin?: {playerId: string, token: string}}): Promise<GuestSession>",
+      "purpose": "Guest creates a Peer with a random id, connects to derivePeerId(code) with retry, performs hello, resolves on welcome."
+    },
+    {
+      "name": "MessageEnvelope",
+      "signature": "{ v: 1, type: string, seq: number, ts: number, id: string, payload: object }",
+      "purpose": "Universal wire shape; seq per-sender monotonic, ts epoch ms (also used for clock sync)."
+    },
+    {
+      "name": "hello (guest→host)",
+      "signature": "{ v:1, type:'hello', payload:{ name: string, clientNonce: string, rejoin?: {playerId: string, token: string}, wantSpectate?: boolean } }",
+      "purpose": "First message on every connection; requests a seat or reclaims one."
+    },
+    {
+      "name": "welcome (host→guest)",
+      "signature": "{ v:1, type:'welcome', payload:{ playerId: string, token: string, roomCode: string, hostEpoch: number, config: GameConfig, snapshot: RedactedSnapshot } }",
+      "purpose": "Grants identity + first redacted view; token is confidential to that one peer."
+    },
+    {
+      "name": "error (host→guest)",
+      "signature": "{ v:1, type:'error', payload:{ code: 'ROOM_FULL'|'BAD_PROTOCOL'|'NAME_TAKEN'|'NOT_AUTHORIZED'|'KICKED', message?: string } }",
+      "purpose": "Typed refusals so the guest can render localized, actionable UI."
+    },
+    {
+      "name": "snapshot (host→guest)",
+      "signature": "{ v:1, type:'snapshot', seq:n, payload:{ snapshot: RedactedSnapshot } }",
+      "purpose": "Authoritative full state; client applies only if seq > last; drives all UI."
+    },
+    {
+      "name": "event (host→all)",
+      "signature": "{ v:1, type:'event', payload:{ event: 'phase'|'announce'|'death'|'deal'|'reveal'|'voteTally', ... } }",
+      "purpose": "Lossy UX driver (animations/toasts); never the source of truth."
+    },
+    {
+      "name": "action (guest→host)",
+      "signature": "{ v:1, type:'action', id, payload:{ kind:'vote'|'nightKill'|'protect'|'investigate'|'lastWords', targetId?: string, day?: number } }",
+      "purpose": "Player intent; host validates against phase, role, liveness and dedups by id."
+    },
+    {
+      "name": "chat (both)",
+      "signature": "{ v:1, type:'chat', id, payload:{ from: playerId|'spectator', text: string, ts:number } }",
+      "purpose": "UTF-8 text (EN+AR allowed); max ~500 chars; host echoes to permitted audience only."
+    },
+    {
+      "name": "ping / pong",
+      "signature": "{ v:1, type:'ping', payload:{ t0:number } }  /  { v:1, type:'pong', payload:{ t0:number, tHost:number } }",
+      "purpose": "Liveness + clock-offset sampling."
+    },
+    {
+      "name": "kick (host→guest)",
+      "signature": "{ v:1, type:'kick', payload:{ reason: string } }",
+      "purpose": "Moderator/host removes a player; guest clears its token and returns home."
+    },
+    {
+      "name": "HostSession",
+      "signature": "interface HostSession { code:string; peerId:string; broadcast(type,payload):void; sendTo(playerId,type,payload):void; redactedSnapshotFor(playerId):RedactedSnapshot; advancePhase():void; setModerator(peerId, token):void; end(reason):void; on(evt, handler):void }",
+      "purpose": "The server API: only the host mutates state and emits snapshots."
+    },
+    {
+      "name": "GuestSession",
+      "signature": "interface GuestSession { playerId:string; token:string; send(type,payload):void; onSnapshot(h):void; onEvent(h):void; reconnect():void; disconnect():void }",
+      "purpose": "Client API; reconnect() re-runs the hello handshake using the stored token."
+    },
+    {
+      "name": "SlotStore",
+      "signature": "class SlotStore { claim(playerId,token,conn):Slot; find(playerId):Slot|undefined; verify(playerId,token):boolean; markSeen(playerId); sweep(now):ExpiredSlot[] }",
+      "purpose": "Host-side player registry: identity tokens, liveness timestamps, grace expiry and eviction."
+    },
+    {
+      "name": "ClockSync",
+      "signature": "class ClockSync { observe(t0:number,tHost:number,t3:number):void; get offset():number; now():number }",
+      "purpose": "EWMA host-clock offset so guests can render deadlineAt countdowns despite skew."
+    },
+    {
+      "name": "handleMessage",
+      "signature": "function handleMessage(session, conn, raw):void  // parse envelope, version-check, drop unknown/unauthorized, route by type",
+      "purpose": "Single inbound gate with uniform validation and hostile-input rejection."
+    }
+  ],
+  "edgeCases": [
+    {
+      "scenario": "Two players pick the same display name",
+      "handling": "Names are non-unique labels keyed internally by playerId; append a disambiguating suffix visually ('Sara', 'Sara (2)'). Never use name as identity."
+    },
+    {
+      "scenario": "Guest mistypes case or a confusable char (O for 0, l for 1)",
+      "handling": "normalizeCode uppercases, strips separators, maps I/L→1 and O→0 before deriving the peer id; only a genuinely absent room yields peer-unavailable."
+    },
+    {
+      "scenario": "Host's derived id is unavailable-id at creation",
+      "handling": "Re-roll a fresh code, retry up to 5x with backoff; the displayed code changes before any guest joins. If all fail, show a 'broker unavailable, try again' screen."
+    },
+    {
+      "scenario": "Guest's code resolves to no host (typo or host gone)",
+      "handling": "PeerJS peer-unavailable → localized 'Room not found or host offline' with an editable code field and retry; never silently spin."
+    },
+    {
+      "scenario": "Old and new tab share a device and both hold the same token",
+      "handling": "Second valid rejoin for a slot evicts the older channel with sessionReplaced; only one live channel per slot is ever allowed."
+    },
+    {
+      "scenario": "A hostile spectator/guest sends an action during the night phase",
+      "handling": "Host validates sender's slot: spectators and wrong-role/wrong-phase actions are rejected with NOT_AUTHORIZED; the action never mutates state."
+    },
+    {
+      "scenario": "Reconnect mid-night with an un-submitted secret action",
+      "handling": "The fresh snapshot re-prompts the phase; the pending action was never recorded, so the player simply acts again. Host never applies a half-received action."
+    },
+    {
+      "scenario": "Room is already at 20 players",
+      "handling": "welcome is replaced by error{ROOM_FULL}; guest UI offers to wait in case a seat frees in the lobby."
+    },
+    {
+      "scenario": "Duplicate/stale snapshot arrives after a newer one (out-of-order)",
+      "handling": "Client discards any snapshot with seq <= lastAppliedSeq; events are lossy and keyed by event id for idempotent animation."
+    },
+    {
+      "scenario": "Guest's phone clock is off by hours",
+      "handling": "All deadlines are host-absolute and rendered via ClockSync.offset, so absolute skew cancels; remaining is clamped to [0, phaseMax] to avoid absurd displays."
+    },
+    {
+      "scenario": "Host tab is backgrounded mid-phase and its timer is throttled",
+      "handling": "On visibilitychange/focus the host compares now against deadlineAt and advances immediately; wakeLock reduces the chance; guests cannot be corrupted since only the host advances."
+    },
+    {
+      "scenario": "Guest locked their phone 8 minutes ago (past lobby grace)",
+      "handling": "In lobby: slot removed, name freed. In-game: role is kept but flagged expired/inert so win-count math holds; the seat can be reclaimed only into the same role if they return, otherwise counts as a non-acting voter."
+    },
+    {
+      "scenario": "Host closes the tab entirely (not a blip)",
+      "handling": "Guests retry for 120s showing 'Reconnecting to host…'; on expiry show 'Host left' and clear the session. On a reload within 120s the host restores from localStorage and the game resumes."
+    },
+    {
+      "scenario": "iOS Safari suspends the host during screen lock",
+      "handling": "wakeLock is unsupported on older iOS, so the host UI warns 'keep this screen on'; on return the visibilitychange path advances any passed deadline. This is a known risk, not silently ignored."
+    },
+    {
+      "scenario": "Chat contains mixed Arabic/English or RTL text",
+      "handling": "Chat is UTF-8 text end-to-end; rendering sets dir=auto per message so RTL names/text render correctly inside the LTR/Arabic UI shell."
+    },
+    {
+      "scenario": "A malicious guest floods chat or actions",
+      "handling": "Host rate-limits per slot (e.g. chat ≤5 msgs/5s, actions ≤1 per phase per kind) and silently drops excess; repeated abuse escalates to kick."
+    },
+    {
+      "scenario": "Network hands off wifi→cellular, data channel dies",
+      "handling": "onclose/iceState failed triggers immediate GuestSession.reconnect() running the hello handshake with the stored token; the host sees a clean rejoin into the same slot."
+    }
+  ],
+  "risks": [
+    "Public PeerJS cloud broker is a shared global dependency: outages, rate limits, and id collisions with unrelated apps all terminate the whole party. Prefixing mitigates collisions but not broker availability; a self-hosted PeerServer is the real fix and is blocked by the 'no server' constraint.",
+    "No TURN servers configured: WebRTC will fail on symmetric-NAT / locked-down corporate or hotel WiFi where UDP is blocked. Public PeerJS provides STUN only. This will cause real join failures in some venues.",
+    "20 simultaneous DTLS/SCTP handshakes against one mobile host can briefly thrash CPU and radio; mitigating by lobby-paced joins is a UX assumption that should be load-tested, not relied on blindly.",
+    "iOS Safari aggressively suspends backgrounded tabs and lacks wakeLock on older versions — the host losing clock authority is the most likely in-the-wild failure of AUTOMATED mode, only partly mitigated.",
+    "A guest can still cheat by misreporting its OWN action/identity or colluding out-of-band; the design provably prevents reading secrets, but cannot prevent lying, and the spec's secrecy goal should not be confused with anti-collusion.",
+    "Host localStorage persistence of full game state (including all roles) means anyone with the physical device or XSS on the host page can read secrets; acceptable for a party game but should be documented and cleared on game end.",
+    "PeerJS reconnection to the broker re-acquiring the same deterministic host id can transiently fail if the stale lease has not been released, forcing guests into the reconnect overlay even though the host is fine."
+  ]
+}

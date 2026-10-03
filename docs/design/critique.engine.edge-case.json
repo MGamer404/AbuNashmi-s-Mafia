@@ -1,0 +1,100 @@
+{
+  "problems": [
+    {
+      "issue": "FATAL anti-cheat hole in AUTOMATED mode. projectState only redacts data for NON-host viewers, but the host's browser is the authoritative server and holds the full GameState (all roles, detectiveKnowledge, slot internals) in JS memory. In AUTOMATED mode there is no non-player moderator, so by construction a player must host — that player opens devtools and reads every role and every investigation. This directly violates the CRITICAL constraint 'a cheating player must NOT be able to read secret information by opening devtools.' The spec's 'engine-level anti-cheat boundary' is a network/redaction boundary only, not a memory boundary.",
+      "severity": "fatal",
+      "fix": "Make it a locked rule that the authoritative host is never a player: in AUTOMATED mode require a dedicated non-playing host device/session (reuse the moderator channel as an invisible engine host), or run the engine inside a Worker/closed scope whose state is never reachable from the player UI context. Document that a player-hosted automated room is insecure by design and disallow it (or ship a headless host page)."
+    },
+    {
+      "issue": "Non-terminating runoff when tiePolicy=RUNOFF. The transition is DAY_VOTE -> (DAY_RUNOFF) -> DAY_ELIMINATE, and edge case 'Runoff ties again' says 'tiePolicy is applied a second time.' If tiePolicy=RUNOFF, applying it a second time re-opens another runoff, and a third tie re-opens a fourth, forever — an infinite loop / soft-lock. The handling text only describes the default NO_ELIMINATION case; the RUNOFF branch is circular.",
+      "severity": "fatal",
+      "fix": "Cap runoffs at exactly one: state a 'runoffDepth' counter; a second tie must fall through to NO_ELIMINATION (or RANDOM) regardless of tiePolicy, never re-open RUNOFF. Encode this in the transition table and add a test with a permanently tied runoff."
+    },
+    {
+      "issue": "TICK is not rejectable as stale. Action union defines {type:'TICK', at} with no phaseId (and no armed-deadline), yet every other decision action carries phaseId specifically so out-of-order/reconnect traffic can be dropped. A timer armed for phase A that fires after A already advanced (mod advanced early, or tab woke up) is evaluated against the current phase B's deadline. If B is WAIT_FOR_MOD (deadline=null) it is harmless, but after a WAIT->AUTO re-arm (deadline = at + remainingMs) or a short-duration phase, a late A-timer can prematurely advance B. There is also no stated guard that ADVANCE/TICK are no-ops in ENDED, so a lingering timer can attempt a transition after GAME_OVER.",
+      "severity": "major",
+      "fix": "Give TICK (and SET_ADVANCE_POLICY-driven timers) the phaseId and armed deadline at dispatch: {type:'TICK', phaseId, deadline, at}; reject when phaseId != state.phaseId or deadline != state.advance.deadline. Add an explicit terminal guard: no phase mutation in ENDED except REMATCH."
+    },
+    {
+      "issue": "Moderated mode can deadlock with no exit. WAIT_FOR_MOD and MANUAL carry no deadline, so the only way to leave a phase is a human ADVANCE. If the moderator disconnects (or the mod IS the host and the host tab dies), the game stalls in a phase with no timer and no fallback. The spec addresses player disconnect (RETENTION) but never moderator/host disconnect, despite the HARD CONSTRAINT 'host disconnect handling.'",
+      "severity": "major",
+      "fix": "Define a moderated-mode liveness rule: moderator disconnect (heartbeat timeout) either (a) auto-switches the affected phase to a bounded fallback timer, or (b) auto-abstains/resolves the open slot and pauses, with reconnect resuming remainingMs. Also define host-migration or explicit 'host lost -> game abandoned' handling; state it in the spec rather than leaving it to transport."
+    },
+    {
+      "issue": "LEAVE / long-term disconnect vs. alive and win conditions is undefined. A player who leaves (not just momentarily disconnects) is never marked dead per the spec; RETENTION only sets connected=false and keeps them eligible. A ghost player stays 'alive' indefinitely, still counts in aliveTown/aliveMafia parity, can never be voted meaningfully (they never act), and never gets last words. With 20 players this lets a dead-weight townie keep town count up (town can dodge a mafia-parity loss), or keeps a mafia 'alive' for MAFIA parity. It also breaks 'Mafia wins when no town can act' reasoning.",
+      "severity": "major",
+      "fix": "Separate 'disconnected but retained' from 'left/abandoned.' Define a LEAVE/abandon rule (after a timeout or explicit leave during a game) that removes the player from eligibility and from parity, or converts them to spectator, with a stated effect on win evaluation. Specify JOIN after START (late join = lobby-only or spectator)."
+    },
+    {
+      "issue": "voteVisibility=PUBLIC contradicts the anti-cheat/redaction policy. PUBLIC means 'who voted whom' must be visible to all clients during the open vote, i.e., raw slot.submissions must be broadcast mid-phase. But risk #10 states 'projectState must strip raw submissions and expose only the Resolution.' These cannot both hold: either the live tally/ballot is projected (and can be replayed/leaked) or it is stripped (and PUBLIC visibility is impossible).",
+      "severity": "major",
+      "fix": "Decide projection semantics per voteVisibility: for PUBLIC, project a sanitized per-voter map derived from submissions (not the raw slot), and update risk #10 to say 'strip slot internals except the fields PUBLIC visibility requires.' For SECRET, project only the aggregate/Resolution. Make the projection of submissions an explicit, tested field."
+    },
+    {
+      "issue": "Stalemate rule is internally contradictory and lacks a reset. Decision says the counter tracks 'consecutive rounds with no night death AND no day elimination,' but the edge case increments it on any no-elimination/no-vote day, and never states that a night death or a day elimination resets it to 0. Worse, evaluateWin's DRAW predicate is listed as evaluated 'immediately on every death event' — a death event is progress, so DRAW can never correctly fire there; DRAW belongs at a phase boundary (CHECK_WIN/end-of-round).",
+      "severity": "major",
+      "fix": "Define stalemate strictly per round: increment only when a completed round had no night death AND no elimination; reset to 0 on either. Evaluate the DRAW predicate only at CHECK_WIN (end of round), not on death events, and correct the edge-case text."
+    },
+    {
+      "issue": "NIGHT_RESOLVE says 'freeze both slots,' but a night has three decisions (kill, protect, investigate). GameState stores investigate outside the PendingAction system ({detectiveId,targetId,result}), so its freeze/phaseId/resolve behavior is unspecified. If the active phaseId is not rotated at NIGHT_RESOLVE (or investigate is not covered by the same write-once guard), a late or duplicate SUBMIT for investigate can mutate detectiveKnowledge after night resolution — exactly the class of race the phaseId mechanism exists to stop.",
+      "severity": "major",
+      "fix": "Either model investigate as a PendingAction slot like the others (reusing resolvePending with aggregate SINGLE), or explicitly state that investigate submissions are guarded by phaseId and the slot is frozen/resolved in NIGHT_RESOLVE step (2)-(4). Replace 'both slots' with the actual three and add a late-investigate-submit test."
+    },
+    {
+      "issue": "Immediate win evaluation on death events loses information. When the last mafia dies in NIGHT_RESOLVE, the spec goes 'straight to ENDED,' skipping DAY_ANNOUNCE — players never learn who died/was saved that night. When an elimination triggers a win, evaluateWin fires during DAY_ELIMINATE and jumps to ENDED, skipping LAST_WORDS — the eliminated player loses the 'last words' moment the brief requires, and there is no stated ordering between the win transition and the pending announcement/last-words slots.",
+      "severity": "major",
+      "fix": "Define an end-of-game drain: on a win transition, still emit the night announcement and open/resolve LAST_WORDS (or explicitly state last words are forfeited on game-ending deaths and why), and ensure any OPEN decision slot is frozen before ENDED (this is risk #5 — make it a specified step, not a risk)."
+    },
+    {
+      "issue": "ABSOLUTE majority threshold is undefined. With allowAbstain=true and majorityRule=ABSOLUTE, the spec never says the denominator is living players vs. votes cast, nor whether abstentions count. If the denominator is living players and abstentions are common, no candidate can ever reach an absolute majority, so the vote always resolves NO_ELIMINATION — a soft stall that also silently inflates the stalemate counter. Same ambiguity affects whether a majority is required among eligible voters or present voters in a runoff.",
+      "severity": "major",
+      "fix": "Specify the denominator explicitly (e.g., majority of living non-abstaining votes, or majority of all living players) as part of the vote config, and define how abstentions and runoffVoters interact with ABSOLUTE. Add tests for 5- and 20-player absolute votes."
+    },
+    {
+      "issue": "Night kill ties have no defined tiebreak. tiePolicy is defined only for the day vote; resolvePending's aggregate/tiebreak for KILL with multiple mafia is unspecified. Two mafia submitting different victims yields a plurality tie with no stated resolution (random? NO_KILL? first?), so the victim is either nondeterministic or undefined — and RANDOM_VICTIM determinism claims elsewhere don't cover this case.",
+      "severity": "major",
+      "fix": "State the KILL aggregation and tie behavior explicitly (recommend: plurality, tie -> NO_KILL, or a seeded PRNG tiebreak with the rng advance documented), and confirm aggregate=SINGLE/PLURALITY per slot kind so multi-actor slots are not accidentally collapsed to one vote."
+    },
+    {
+      "issue": "RETRACT is not gated by changeableUntilDeadline. The spec says votes lock on cast when changeableUntilDeadline=false, but the Action union exposes RETRACT with no stated restriction. A retract after lock would undo a 'locked' vote, defeating lock-on-cast and allowing vote manipulation/denial.",
+      "severity": "minor",
+      "fix": "Define RETRACT semantics explicitly: when changeableUntilDeadline=false, RETRACT after the first cast is rejected (idempotent, no state change). Add a test."
+    },
+    {
+      "issue": "Mode-switch arithmetic breaks on an already-expired timer. AUTO->WAIT sets remainingMs = deadline - at with no lower bound, so if the deadline has passed but the TICK has not yet been processed, remainingMs goes negative; a subsequent WAIT->AUTO sets deadline = at + remainingMs (in the past), firing immediately or producing a nonsensical policy. The 'full duration if never armed' clause only covers the never-armed case, not the expired-but-unprocessed case.",
+      "severity": "minor",
+      "fix": "Clamp remainingMs = max(0, deadline - at) on the AUTO->WAIT transition, and treat remainingMs<=0 on WAIT->AUTO as an immediate (or full-duration) re-arm per a stated rule."
+    },
+    {
+      "issue": "Role counts and START validation are undefined for the 5..20 range. assignRoles claims 'validated against 5..20 players and mafia/town balance' but gives no formula for how many Mafia (or whether Doctor/Detective stay at exactly one each) as player count varies. A fixed 1 Mafia vs 19 town at 20 players is unbalanced; the spec also never says what reduce does if START arrives with an out-of-range or invalid roster (reject? clamp?).",
+      "severity": "minor",
+      "fix": "Specify mafia count as a function of player count (e.g., floor(n/4) clamped to >=1) and whether Doctor/Detective scale; define START with invalid roster as a rejected, idempotent action with a private error to the host/moderator. Add 5- and 20-player role-distribution tests."
+    },
+    {
+      "issue": "Runoff with an empty or degenerate eligible set is unhandled. With runoffVoters=NON_TIED and a tie that includes every alive player, the runoff slot has no eligible voters and resolves to nothing; the spec never states the outcome (NO_ELIMINATION?) or whether the tiePolicy is then consulted, risking an unresolved/looping runoff for all-tied boards.",
+      "severity": "minor",
+      "fix": "State that an empty eligible set or empty targetSpace resolves immediately to NO_ELIMINATION (and stops runoff recursion), and test the all-players-tied board."
+    },
+    {
+      "issue": "Two parallel decision fields (slot and vote) can desync. GameState carries both slot: PendingAction|null and vote: PendingAction|null, plus night.{kill,protect,investigate}. It is never specified whether DAY_VOTE/DAY_RUNOFF writes slot or vote, or which field projectState/handlers read. Two fields for the same abstraction invites a stale OPEN vote surviving into a later phase.",
+      "severity": "minor",
+      "fix": "Pick one canonical 'current decision slot' field and derive the others (e.g., night.* and vote.* as resolved archives only), or explicitly document which field is authoritative in each phase and clear the non-authoritative one on transition."
+    },
+    {
+      "issue": "Doctor protection-history (doctorHistory) semantics under an illegal mod override are ambiguous. The override 'resolves to ABSTAIN (no protection),' but the spec does not say whether doctorHistory records null (no restriction next night) or the attempted target (making next night's repeat illegal). This changes gameplay legality for a case the spec explicitly creates.",
+      "severity": "minor",
+      "fix": "State that doctorHistory records the actual protected target or null on ABSTAIN/NO_KILL, so an abstained/illegal save does not consume the 'no repeat' restriction; add a test."
+    }
+  ],
+  "strengths": [
+    "The PendingAction slot + Resolution collapse is a genuinely strong unification: making 'who decided' unrepresentable downstream removes the classic drift between player and moderator code paths.",
+    "phaseId on every decision action, plus write-once RESOLVED slots, is the right mechanism for rejecting reordered/duplicate WebRTC traffic and reconnect replay.",
+    "The pure reducer with a seeded PRNG and injected time (action.at, deadline in state) is a correct foundation for replayable, headless-testable rules — the right call over live Date.now()/Math.random() callbacks.",
+    "AdvancePolicy as data (deadline/remainingMs in state, timer owned by the runtime) is a sound way to make mid-phase mode switching a cancel/re-arm number rather than a rebuild.",
+    "Immediate win evaluation on death events correctly prevents the 'dead side takes another turn' bug that end-of-phase-only checking would allow.",
+    "Phase auto-skip when a role is dead/absent keeps the night transition table total without dead phases stalling automated games.",
+    "projectState as an explicit redaction boundary is the right architectural instinct (and the risk list correctly flags that raw submissions must never leak).",
+    "Config-driven voting (tiePolicy/visibility/self-vote/abstain) matches the brief's demand that house rules be flags rather than forks."
+  ],
+  "verdict": "sound-with-fixes"
+}

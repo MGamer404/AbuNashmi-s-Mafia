@@ -1,0 +1,97 @@
+{
+  "problems": [
+    {
+      "issue": "CSP `connect-src 'self' wss://<broker>` will break room creation/join. The vendored peerjs.min.js (v1.5.x, confirmed in vendor/) builds `new URL(`https://${host}:${port}${path}${key}/${e}`)` and calls fetch() to get a peer id when none is passed, and opens signalling over wss://0.peerjs.com:443/peerjs?key=peerjs. Only wss is whitelisted, so the HTTP id fetch (and any XHR signalling fallback) is blocked by CSP. The spec says 'the 6-char room code IS the peer id' (host passes explicit id), but it never says guests pass an explicit locally-generated id, so guests will hit the blocked fetch and joining will silently fail.",
+      "severity": "major",
+      "fix": "Either (a) add both schemes for the literal broker to the CSP: connect-src 'self' https://0.peerjs.com wss://0.peerjs.com; or (b) mandate that EVERY client (host and guest) passes an explicit locally-generated peer id to `new Peer(id, ...)` so the id fetch is never made. Note the meta CSP also cannot use frame-ancestors/report-uri/sandbox, and `<broker>` must be a literal domain in the built file, not a placeholder string."
+    },
+    {
+      "issue": "Moderated mode flatly contradicts the flagship anti-timing guarantee. The spec says night 'NEVER ends early even if all actions arrive' and phase windows are fixed, but HOST-MODERATED mode is defined as a human who 'advances phases' ('Mafia, wake up' -> ...). If the moderator can advance at will, nightDurationMs/voteDurationMs are void and the fixed-window, single-tick-fanout anti-timing properties (which are the core of the whole secret-leak argument) do not hold in moderated mode. The spec never states which mode the timers apply to.",
+      "severity": "major",
+      "fix": "State explicitly that the fixed-window anti-timing guarantees apply ONLY to automated mode. In moderated mode, define behaviour: either the moderator's advance is gated until phaseEndsAt (so windows still hold), or document that moderated mode trades away the timing guarantee. This must be resolved before implementation or `phaseEndsAt`/timer code and the moderated control flow will fight each other."
+    },
+    {
+      "issue": "buildRoleBag(playerCount) is load-bearing but unspecified. It 'computes mafiaCount and fills the four classic roles' yet there is no formula for mafiaCount and no rule for how many Doctors/Detectives exist at 5..20 players. Win conditions (mafia >= town) and the whole redaction/visibility policy depend on these counts. An implementer cannot build the role bag from this spec.",
+      "severity": "major",
+      "fix": "Specify a concrete table/formula, e.g. mafiaCount = clamp(round(playerCount/4), 1, 5); exactly ONE Doctor and ONE Detective; remainder Villagers — with the invariant mafiaCount < townCount check for legal player counts. Include the resulting bag for n=5 and n=20 in the spec."
+    },
+    {
+      "issue": "Commit-reveal verification is under-specified and will spuriously fail. Clients receive reveal {nonce, rolesByPublicId, commitment} as a JSON object over the wire, then must recompute canonicalJSON(...) and re-hash. JSON object key order is not stable across a parse/serialize round-trip, so naive canonicalJSON on host vs client produces different bytes and the hash mismatches even for an honest host. 'canonicalJSON' is named but never defined.",
+      "severity": "major",
+      "fix": "Define canonicalJSON (recursively sorted keys, no whitespace, UTF-8, numbers as integers). Better: have the host broadcast the exact canonical string it hashed and let clients hash the received bytes verbatim, avoiding re-serialization entirely. Add a unit test that a host-generated and client-verified proof agree."
+    },
+    {
+      "issue": "The chat-channel visibility rule is absent from the visibility table. board.chat carries channel:'public'|'mafia'|'dead', and mafiaTeam/dead channels are described ad hoc ('delivered only to connected mafia viewers'), but redact() is never told to FILTER the chat array by the viewer's allowed channels. An implementer reading only the visibility table will broadcast all chat and leak the mafia channel to everyone — exactly the devtools read this design exists to prevent.",
+      "severity": "major",
+      "fix": "Add an explicit row to the visibility table: board.chat for a viewer = public messages + mafia messages iff viewer.role==='mafia' + dead messages iff viewer is dead or spectator (per deadCanChat). State it as an invariant and assert it in the redaction-matrix test."
+    },
+    {
+      "issue": "resolveMafiaKill(submissions, nonce, rng=secureRandomInt) is self-contradictory: the rationale claims the tie-break is 'deterministic from a per-night nonce', but the signature defaults to secureRandomInt, which is not a function of the nonce. The nonce and the rng parameter cannot both drive the tie-break.",
+      "severity": "minor",
+      "fix": "Pick one. Simplest: drop the nonce and tie-break with secureRandomInt (the determinism is host-only and clients cannot verify it anyway, so the nonce buys nothing). If cross-client verifiability is truly wanted, define pick = tiedTargets[ hash(nonce||sortedTargets) mod tiedTargets.length ] and remove the rng parameter."
+    },
+    {
+      "issue": "liveVoteReveal vs liveTally: the text toggles on 'liveVoteReveal' in one paragraph and on 'liveTally' in the config; ClientView.config only has liveTally, while board.votes and board.voteCounts are listed as always-present fields, contradicting 'Default liveTally=false: only final counts are revealed'.",
+      "severity": "minor",
+      "fix": "Use one flag name throughout. In redact(), omit board.votes and board.voteCounts entirely (allowlist discipline) unless reveal is enabled; after close, always include final voteCounts."
+    },
+    {
+      "issue": "crypto.subtle (SHA-256 commit-reveal) only exists in a secure context, and is absent in older iOS/iPads common in a party setting and in any file:// usage. verifyDeal() has no fallback, so game-over verification throws on such devices. The spec asserts GitHub Pages (HTTPS) but never states the secure-context requirement or a fallback.",
+      "severity": "minor",
+      "fix": "Guard: if (!globalThis.crypto?.subtle) skip verification and show 'deal proof unavailable on this device' rather than throwing. Document that the app must be served over HTTPS (GitHub Pages) and will not work from file://."
+    },
+    {
+      "issue": "A 6-character room code doubles as the PeerJS peer id on a shared public broker (~36 bits if alphanumeric): it is enumerable (anyone can probe the broker to discover live rooms/guests) and colliding codes cause the second host's id registration to fail. The spec says nothing about id-taken handling or room-code length.",
+      "severity": "minor",
+      "fix": "Use 8+ alnum chars, and handle the broker's 'id is taken' error by regenerating the room code and re-registering. Document that the room code is a bearer-ish join capability and is deliberately weaker than the 256-bit seat tokens."
+    },
+    {
+      "issue": "ViewerContext.role is typed as a required union 'villager'|'mafia'|'doctor'|'detective', but spectators and dead players have no role to expose, and ClientView.self.role has the same problem. This type is the contract redact() is written against, so the mismatch will stall or force ad-hoc undefined handling.",
+      "severity": "minor",
+      "fix": "Make role nullable (role: Role | null) and define what self/self.privateNotes contain for a spectator (public board only, no self.role, no privateNotes). Cover in the redaction-matrix test."
+    },
+    {
+      "issue": "Commit-reveal is over-engineered for the threat it addresses. The spec concedes the host can already peek at every role, deal itself the mafia, and manipulate liveness; commit-reveal only stops retroactively editing roles AFTER the commitment is public. That threat is dominated by the admitted host-cheating risk, yet commit-reveal costs async Web Crypto, canonical-JSON determinism, nonce distribution, reveal UI, and a verification path — for a room whose host is normally the person who invited you.",
+      "severity": "minor",
+      "fix": "Drop commit-reveal from v1 (or gate it behind an optional 'fairness proof' toggle). This is one of the largest single complexity reductions available and costs almost no real security given the stated trust model."
+    },
+    {
+      "issue": "Host-clock synchronization (serverNow + client-side offset estimation) is more machinery than the problem needs. The goal is only to stop a skewed device clock from gating events; offset estimation over a lossy DataChannel is fiddly and easy to get subtly wrong.",
+      "severity": "minor",
+      "fix": "Replace absolute phaseEndsAt with a host-computed phaseRemainingMs sent in each view; clients count down locally from message receipt and re-anchor on every phase-advance message. This removes serverNow, offset estimation, and skew math entirely."
+    },
+    {
+      "issue": "The 'dual independent shuffles' are security theatre. Once publicIds are crypto-random and the board is pinned to join order, a single uniform Fisher-Yates over the role bag assigned to seats is already uniform; the second shuffle of publicIds adds no entropy to the assignment and no protection.",
+      "severity": "minor",
+      "fix": "Keep one Fisher-Yates (crypto, rejection-sampled) over the role bag mapped to seats in pinned order; delete the second shuffle from the spec to save code and testing."
+    },
+    {
+      "issue": "Scope risk: the security spec silently assumes the full feature matrix (P2P + reconnection, 9-phase state machine, 2 modes x 2 live sub-styles, 5-20 seats, 3 chat channels, EN/AR RTL, animated deal, moderator panel, runoff, reveal-on-elimination) on top of a dozen security mechanisms (allowlist redact x7 viewer classes, 256-bit tokens, epoch/seq, dual RNG, commit-reveal, clock sync). For a solo implementer with no build step/framework, this is a multi-week build with a large surface area to get wrong.",
+      "severity": "major",
+      "fix": "Add an explicit MVP phase split to the spec: Day-1 protections = allowlist redact(), host-derived identity, epoch+seq ordering, textContent-only + CSP, opaque publicIds, fixed windows. Defer commit-reveal, clock sync, remote moderator device, runoff tie-break, modEntersEverything sub-style, and revealOnElimination to later phases. Specify the phasing so a solo dev can ship an automated-mode core first."
+    },
+    {
+      "issue": "Several guards are named but not specified enough to implement: 'host rate-limits join attempts' (no bucket/limit), the FIRST-join flow (how a seatToken is issued on initial join vs presented on reconnect), and post-host-restart resync (new epoch is published, but the client resync handshake is not defined).",
+      "severity": "minor",
+      "fix": "Specify: join rate-limit = N connections/sec per peer with a drop, first-join issues seatToken in the welcome ClientView, reconnect presents {roomCode, seatToken}, and epoch-change triggers the client to request a fresh ClientView and discard local state."
+    },
+    {
+      "issue": "Dead-mafia channel semantics are ambiguous. The edge case says a dead player gets 'no mafia channel unless they were mafia (their own team info is their own)', which leaves undefined whether a dead mafia keeps the live mafia channel (leaking living-mafia chat/identities to a spectator-class viewer's devtools, and letting dead mafia coordinate with the living).",
+      "severity": "minor",
+      "fix": "Decide and state it: either a dead mafia loses the mafia channel on death (receives own former role + dead channel only), or retains it — and justify the info-flow. The current wording permits both."
+    }
+  ],
+  "strengths": [
+    "Correct core architecture for the locked decisions: one authoritative GameState in the host closure plus a single pure allowlist redact(state, viewer) is the right shape given 'host browser is the server'. Allowlist (build only what is visible) instead of blacklist deletion is the correct safe default, and the pure function is the ideal Node-24 unit-test target.",
+    "Identity is always host-derived from the peer-connection->seat map; client-declared role/isModerator/publicId are ignored and stripped. This closes the single most obvious and most damaging cheat (self-declaring moderator) with almost no code.",
+    "Rendering hygiene is correct and cheap: textContent/createTextNode only, no innerHTML/eval, sanitizeName/sanitizeChat with NFC normalization and bidi-override stripping, and a CSP. This genuinely makes chat/name injection inert and blocks RTL-name spoofing on both LTR and RTL layouts.",
+    "Opaque crypto-random publicIds plus a board order pinned at join time (never re-sorted by role/alive) removes index-guessing and visual role-clustering leaks for very little effort.",
+    "epoch + monotonic seq with seq<=lastSeq drop and epoch-change full resync directly satisfies the flaky-Wi-Fi / out-of-order hard constraint and is straightforward vanilla JS.",
+    "Fixed-length night/vote windows and single-event-loop fanout are low-code, high-leverage anti-timing measures; per-action 'recorded' acks carry no ordering information.",
+    "Reconnect via an opaque 256-bit seatToken rebinding a new DataConnection to an existing seat (never deriving from peer id/join order) is simple and effectively unguessable.",
+    "The trust model is honest: it openly concedes host-cheating, off-channel collusion, shoulder-surfing, and compromised devices rather than pretending P2P can solve them. This prevents false UX/security expectations and is the right framing for a host-authoritative design.",
+    "Detective results stored per-seat and injected only into that detective's view (no shared results array, dawn outcome carries only public killedId/saved) correctly closes the classic shared-results leak.",
+    "ModeratorView isolated to the authenticated moderator peer, with default host==moderator meaning the full role map never traverses the network at all, is a sensible default."
+  ],
+  "verdict": "sound-with-fixes"
+}

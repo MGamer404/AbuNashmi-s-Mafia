@@ -1,0 +1,85 @@
+{
+  "problems": [
+    {
+      "issue": "Moderator identity and authority are never resolved, yet HOST-MODERATED mode is one of the two primary requirements. The spec calls ModeratorPanel a 'distinct module, not a card-bearing player' and says 'the moderator is also on a phone', which reads as a separate device — but transport is host-authoritative with room code == host peer id. If the moderator is a separate peer, the host must authenticate every mod command (set mode, manual kill/save/investigate, tallies, announcements); otherwise any player can spoof outcomes. If the moderator is the host, the spec never says so. This stalls an implementer on the single most important flow.",
+      "severity": "major",
+      "fix": "Pick one and state it. Recommended: in moderated mode the HOST device itself renders the ModeratorPanel (host is trusted, already holds all roles); there is no separate moderator peer. If a separate moderator device is truly wanted, define a moderator token minted at room creation, required on every mod action, and specify how that device joins (it must not occupy a player seat)."
+    },
+    {
+      "issue": "Cross-device clock sync via a 'ping-derived clockOffset' feeding renderTimerRing is over-engineered for a party game. Phase timers are 30–60s; sub-second agreement between phones is not needed. Continuous ping/offset estimation is fiddly, adds message traffic, and introduces edge cases (measurement staleness, clock drift) for no gameplay benefit.",
+      "severity": "major",
+      "fix": "Broadcast a duration (durationMs) with the phase event and have each client count down from its own receipt time using a monotonic source (performance.now). The host remains the only authority on when a phase actually ends and announces the transition. Drop the ping-based renderTimerRing opts.clockOffset; keep a single optional one-shot offset only if absolute deadline display is required, and make it non-load-bearing."
+    },
+    {
+      "issue": "The client timer fires onExpire and 'auto-submits if selected else abstains'. With the host as the authoritative server, client-side auto-submit duplicates host expiry logic and races it: a backgrounded/throttled phone (iOS Safari suspends timers when the screen locks) may fire late, early, or not at all, and two clients can disagree about whether a player abstained.",
+      "severity": "major",
+      "fix": "Make expiry host-authoritative. Clients render the ring as display-only (no onExpire side effects beyond a toast). The host computes deadline, applies abstain/skip for non-responders, and broadcasts the resolved state. Clients never auto-submit on their own clock."
+    },
+    {
+      "issue": "The i18n dictionary example is written in TypeScript: `export default { ... } satisfies Record<string,string>`. In a NO BUILD STEP project these ship as plain browser ES modules (i18n/en.js, i18n/ar.js); `satisfies` is a syntax error and the whole module fails to parse, blanking the i18n boot gate.",
+      "severity": "major",
+      "fix": "Write plain object literals with a leading JSDoc `/** @type {Record<string,string>} */` if you want editor type-checking. Remove `satisfies` (and any other TS-only syntax) from all runtime .js files. Also treat every 'function foo(x: T): R' signature in the spec as documentation only."
+    },
+    {
+      "issue": "The consensus string `'You and {others} {others_one:other} picked {name}'` uses a nested-plural placeholder syntax that t() does not define. The documented t() does only {token} interpolation plus key_<Intl.PluralRules category> selection driven by a single `count` argument. An implementer cannot know how to parse `{others_one:other}`.",
+      "severity": "major",
+      "fix": "Either split into distinct keys selected by the mafia-member count (e.g. 'night.mafia.consensus_solo' / '..._two' / '..._other'), or extend the t() spec to explicitly parse the nested `{token_category:token_category}` form and document it with examples in both dictionaries. Do not hand-wave it."
+    },
+    {
+      "issue": "The persistence model contradicts itself. The risks section demands localStorage snapshots 'never contain another player's secret role', but the host-disconnect recovery requires the host to resume from a localStorage snapshot and replay phase + private payloads — which is impossible unless the host snapshot contains every player's role, the night's picks, and the detective's cumulative findings.",
+      "severity": "major",
+      "fix": "Explicitly split storage into two keys with different contracts: (a) HOST snapshot — may contain full game state including all roles/findings, justified because the host device is by definition trusted; (b) CLIENT snapshot — locale, mute, own role only, never others' secrets. Document that only the host device may persist secrets, and wipe them when the room closes."
+    },
+    {
+      "issue": "Host reconnection assumes reliable reclaim of the room-code peer id ('because the peer id equals the room code, the host rejoins the same room'). PeerJS on the public cloud broker does not guarantee instant reclaim: a departed id can be transiently 'unavailable-id', and 6-character ids drawn from a global namespace will occasionally collide with other apps' peers or other concurrent rooms.",
+      "severity": "major",
+      "fix": "Specify the failure path: on create, retry on 'unavailable-id' with a regenerated code and surface 'room code taken, retrying'. On host reconnect, retry the SAME id with exponential backoff and a user-visible 'reconnecting' state; if reclaim fails, fall back to a new code and broadcast it to seated clients. Also note that guessable room codes mean no join protection — add an optional lobby lock/password if privacy matters."
+    },
+    {
+      "issue": "The FLIP deal animation (measure all slot rects, absolutely position cards at a shared deck origin, animate translate/rotate/scale via WAAPI, 280ms travel + 80ms stagger per seat) is substantial hand-rolled machinery for a solo vanilla-JS implementer, and at 20 players the stagger alone is ~1.6s of delay plus ~0.28s travel ≈ 1.9s before the last card lands. It also animates into a scrollable grid where many target slots are offscreen.",
+      "severity": "major",
+      "fix": "Simplify to a fixed, non-measuring animation: pre-lay-out the face-down grid and stagger a single CSS transform/opacity transition per card via one CSS custom property (--i) index, or cap the stagger (e.g. 40ms) and start all cards together. Skip absolute-position FLIP entirely; the reduced-motion fade path is already the honest fallback, so motion is genuinely optional and should not block the critical path."
+    },
+    {
+      "issue": "layoutTable() specifies two layout algorithms — the tile grid AND an optional ring for <=8 players — doubling the layout/state-testing surface for marginal value.",
+      "severity": "minor",
+      "fix": "Cut the ring. One grid (repeat(auto-fill,minmax(82px,1fr))) satisfies 5–20 players; the optional ring is gratuitous complexity and a second source of positioning bugs."
+    },
+    {
+      "issue": "Eight hand-synthesized Web Audio cues including a convincing 'deal riffle' (which requires noise shaping/convolution to sound like card friction) is a large, fiddly, asset-free-by-choice effort. Static assets are permitted, so 'asset-free' is self-imposed.",
+      "severity": "minor",
+      "fix": "Reduce to 3–4 essential cues (your-turn chime, elimination, daybreak, win/lose) synthesized simply, or vendor a handful of tiny CC0 audio files in assets/ (already a served directory). Do not gate the game on a riffle."
+    },
+    {
+      "issue": "Multiple concurrent aria-live regions (turn announcements, 10s/5s timer countdown, role reveal, phase banners) risk over-announcement and cut-off on screen readers; independent regions are not queued and can interrupt each other.",
+      "severity": "minor",
+      "fix": "Funnel all announcements through a single polite live region with a small queue; reserve aria-assertive for game-ending/critical events only. Drop the 5s announcement if 10s already fires."
+    },
+    {
+      "issue": "Detective reconnect behavior says the host replays 'the last private_role payload', but private_role.findings is typed as Finding[] and the detective's persistent findings log is cumulative. A single last payload may not contain prior nights' findings if they were pushed incrementally.",
+      "severity": "minor",
+      "fix": "State that findings are retained host-side in full and the cumulative findings[] is resent in the reconnect private_role payload (not just the most recent result). Conversely, for a reconnect during a phase where the last private payload was an action prompt, define which payload the host replays."
+    },
+    {
+      "issue": "The '--dir multiplier' referenced in setLocale() is undefined: logical properties already flip the entire layout from the dir attribute, so a direction multiplier custom property is redundant or, if it drives something, its mechanism is unspecified.",
+      "severity": "minor",
+      "fix": "Remove --dir unless it has a concrete use (e.g. transforms); if it does, document exactly which selectors consume it. Keep logical properties as the sole layout-flip mechanism."
+    },
+    {
+      "issue": "No host migration path is stated. The spec handles transient host disconnect (host rejoins) but not permanent host loss (phone dies); with the host as the authoritative server and sole holder of all secret state, the game is unrecoverable, yet no UI state communicates this.",
+      "severity": "minor",
+      "fix": "State explicitly that host loss beyond a reconnect window ends the game (no migration), and surface a clear terminal 'host left — game over' screen. Documenting the limit is fine; leaving it implicit is not."
+    }
+  ],
+  "strengths": [
+    "The hostile-client threat model is handled correctly at the architectural level: the UI renders only host-pushed private payloads and never filters secrets in the DOM, and chat channel membership is enforced by the host before delivery rather than hidden client-side. This matches the CRITICAL constraint.",
+    "The reduced-motion path is genuinely strong and unusual: motion is never the sole carrier of the role, with an aria-live announcement and role-sheet text as equivalents, and the card is a real <button>.",
+    "RTL via a single stylesheet using CSS logical properties plus the html[dir] flip, with <bdi>/unicode-bidi isolation and dir='auto' inputs for mixed-script names, is the correct lean approach and avoids the paralleled-stylesheet rot the spec rightly rejects.",
+    "No build step is respected throughout: local ES-module dictionaries imported eagerly to eliminate FOUC, vendored peerjs.min.js, plain CSS, Node only for tests and a zero-dependency dev server.",
+    "Dead chat is OFF by default and, when enabled, strictly dead-to-dead — a correct and non-obvious info-leak prevention consistent with classic Mafia silence.",
+    "AFK handling auto-abstains rather than fabricating actions, with randomisation narrowly scoped to the Mafia pick only to avoid stalling — this avoids silently corrupting Doctor/Detective outcomes.",
+    "The flat five-screen view FSM with overlays (role sheet, moderator panel) and a reconnect snapshot is easily recoverable and matches a party game's real sequence; rejecting tab/hash routing for iOS back-gesture reasons is well-reasoned.",
+    "The one-renderer action panel keyed on (phase.step, myRole) plus config.actionMode avoids divergent player screens across the two moderated sub-styles."
+  ],
+  "verdict": "sound-with-fixes"
+}

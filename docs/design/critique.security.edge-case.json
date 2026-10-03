@@ -1,0 +1,85 @@
+{
+  "problems": [
+    {
+      "issue": "AUTOMATED mode has no exit timers for dawn, discussion, lastWords, or runoff-to-gameOver. The engine is 'driven on timers,' but config only defines nightDurationMs and voteDurationMs. Nothing states who or what ends the 'discussion' phase (no discussionDurationMs), how long 'dawn' holds before discussion, or how long 'lastWords' runs. The phase union includes lobby|dealing|night|dawn|discussion|vote|runoff|lastWords|gameOver, and at least three of these have no stated autonomous transition. This is a state-with-no-exit: in automated mode the game soft-locks at discussion (or dawn/lastWords).",
+      "severity": "fatal",
+      "fix": "Add explicit per-phase durations to config (dawnDurationMs, discussionDurationMs, lastWordsDurationMs) with sane defaults, and specify the automated transition table exhaustively: night->dawn->discussion->vote->(runoff)->lastWords->gameOver, plus the noKillFirstNight and tie-rule branches. Every non-terminal phase must name the event that exits it."
+    },
+    {
+      "issue": "Fixed-length windows (nightDurationMs/voteDurationMs, phaseEndsAt in every view) coexist with HOST-MODERATED manual phase advancement ('Mafia, wake up' -> 'Doctor, wake up' -> 'Day begins' -> 'Call the vote'). The spec never says whether the deadline timer still runs in moderated mode. If it does, a moderator advancing at t=44.9s while the deadline fires at t=45.0s double-advances and skips a phase; if it doesn't, phaseEndsAt is a lying countdown that can expose that the mod advanced early. Either way it's a race the spec explicitly asks us to hunt ('a timer fires during a mod override').",
+      "severity": "fatal",
+      "fix": "State that in moderated mode phase advance is moderator-only (timers are advisory/display-only or disabled), and make ingest of 'advance' idempotent: guard every transition with the expected (round, phase, phaseNonce) so a duplicate/racing advance is a no-op rather than a double step."
+    },
+    {
+      "issue": "resolveMafiaKill is specified as 'deterministic from a per-night nonce' but its signature is resolveMafiaKill(submissions, nonce, rng=secureRandomInt). secureRandomInt is a live CSPRNG, so the default path ignores the nonce entirely and the tie-break changes on every invocation. Any second call (reconnect resync, re-render, a re-resolution after host hiccup) can select a different victim from the same submissions, silently changing the night's kill and contradicting the stated determinism/anti-timing rationale.",
+      "severity": "major",
+      "fix": "Make resolution a pure function of (submissions, nonce): derive the tie-break index deterministically from SHA-256(nonce || sortedTiedTargets) or a seeded PRNG, and remove the live-RNG default. Store the resolved target in state so it is computed exactly once per night."
+    },
+    {
+      "issue": "Internal contradiction in the visibility table: 'Dead player: own former role + public board + dead/spectator channel; no living roles,' yet the edge case says an eliminated mafia 'gets ... mafia channel unless they were mafia (their own team info is their own),' and mafiaTeam is 'populated when viewer.role===\"mafia\"' with alive flags. A dead mafia therefore receives living mafia identities/alive status, directly violating the dead-player class rule. It also lets a dead mafia keep a live coordination channel with living mafia, which classic rules forbid (dead influence the living).",
+      "severity": "major",
+      "fix": "Decide one policy explicitly: either (a) dead mafia retain read-only knowledge of teammates but the mafia channel is write-only for the living and read-only history for the dead, and delete the dead-player 'no living roles' claim, or (b) the mafia channel is only for alive mafia and dead mafia get the dead channel only. Encode whichever in redact() and remove the contradiction."
+    },
+    {
+      "issue": "Switching actionStyle live 'at any phase' has undefined data semantics. Going playersAct -> modEntersEverything mid-night: are already-collected player kill/protect submissions discarded or retained as defaults? Going modEntersEverything -> playersAct mid-vote: is the moderator-entered tally cleared, and must players re-submit? The spec defines side-switching as legal but never says what happens to state.pending, nightActions, or tally, so stale or half-applied actions can be resolved at the deadline. This both loses information and can misresolve the phase.",
+      "severity": "major",
+      "fix": "Specify that changing actionStyle clears the in-flight pending submissions/tally for the current phase and re-opens the action window to its original deadline, or explicitly defines merge precedence (mod override wins). Document per-phase-style transition rules."
+    },
+    {
+      "issue": "lastWords vs win-check ordering is undefined and conflicts with two other rules. Win condition is 'checked at phase boundaries ... after vote close, never mid-phase, so ... Losers are not told prematurely,' but lastWords is also entered after a vote elimination. If the eliminated player is the last mafia, does the game reveal gameOver before, during, or after their last words? The spec also never says whether a night-killed player gets last words (classic house rules differ) — and, tied to problem #1, lastWords has no timer so it has no exit in automated mode.",
+      "severity": "major",
+      "fix": "Define the exact sequence: vote close -> tally -> win check -> (if not over) lastWords -> next phase; if over, transition straight to gameOver without lastWords (or state that last words are permitted and reveal nothing). Explicitly state whether night kills get last words (default: no). Give lastWords a duration/timer."
+    },
+    {
+      "issue": "Host-restart handling both misdiagnoses the cause and leaves no recovery path. The spec says 'Seat tokens stored in sessionStorage may be lost on host restart, so a new deal is created' — but the tokens live on the CLIENT and survive a host restart; the real reason reconnect() returns null is that the host lost the entire seat map/GameState. More importantly, nothing defines who or how a 'new deal' is started: every client reconnects into the same room code as a spectator, mid-game spectator promotion is forbidden, and there is no lobby-reopen path, so the room can permanently soft-lock after a host refresh.",
+      "severity": "major",
+      "fix": "Correct the rationale (host state loss, not token loss). Then define a recovery transition: after host restart/epoch bump, the host enters a fresh lobby at the same room code and all clients are re-seated (or a documented 'start new game' moderator control). Until then, state plainly that host restart ends the game."
+    },
+    {
+      "issue": "Deadline has no grace period, making last-moment losses structural. Because night and vote are fixed windows with a hard phaseEndsAt, a legitimate action sent at (deadline - 100ms) can be processed at deadline+10ms and be dropped as stale by round+phase. With everyone submitting near the buzzer, genuine actions are silently lost and the actor cannot tell whether they were ignored.",
+      "severity": "minor",
+      "fix": "Add a small ingest grace window (e.g. accept messages whose client-observed send time is within ~500ms of deadline, bounded by host receive time), and send the actor an explicit private 'rejected: too late' ack instead of silently discarding."
+    },
+    {
+      "issue": "Runoff voter set and duration are unspecified. The spec says tieRule='runoff' runs a 'fixed-window runoff among tied players' but never says whether the tied players may vote (classic variants differ) or who is eligible. At small table sizes (5 players) a tie can include all or nearly all players, making the runoff degenerate and likely to re-tie; the runoff window also reuses voteDurationMs implicitly but is not stated.",
+      "severity": "minor",
+      "fix": "Specify runoff eligibility (recommend: tied candidates cannot vote, living non-tied players vote) and the runoff window duration, and guarantee a single runoff then fall-through to noElimination on a second tie (the spec already implies this)."
+    },
+    {
+      "issue": "liveVoteReveal (broadcast each vote as cast) contradicts the anti-timing rationale that justifies fixed vote windows and batched liveTally. The spec makes liveTally default false and batches jittered counts to remove per-vote timing correlation, yet allows liveVoteReveal to emit individual votes instantly — the very timing side channel the design elsewhere says it closes.",
+      "severity": "minor",
+      "fix": "Make liveVoteReveal and liveTally mutually exclusive (or merge them into one 'tallyVisibility' control), and state that enabling per-vote reveal is an accepted, opt-in timing leak, not a default."
+    },
+    {
+      "issue": "Doctor repeat-protect is handled only by rejection, with no fallback. If a client (older/buggy, or a reconnect re-sending the previous target) submits the same target as last night, the host rejects it; if the doctor does not resubmit, the night resolves with no protection and no notification beyond generic 'invalid action'. Combined with noKillFirstNight, whether night-1 protection counts toward the repeat lock is also unspecified.",
+      "severity": "minor",
+      "fix": "On rejection, send the doctor a distinct reason ('same target as last night') and either keep the window open for a corrected submission or explicitly accept 'no protect' as a valid outcome; state whether the night-1 no-kill protection sets doctorLastProtectedId."
+    },
+    {
+      "issue": "Mafia kill tie-breaks are not covered by the commit-reveal proof. The deal commitment covers rolesByPublicId and the deal nonce, and per-night kill nonces stay host-only, so a host can steer plurality ties without any post-game verifiability. Given the honest host-trust concession this is not fixable, but the spec presents tie-break as fairness-preserving without noting it is outside the verifiable set.",
+      "severity": "minor",
+      "fix": "Either include per-night resolution nonces in the game-over reveal so tie-breaks can be re-verified, or explicitly list mafia tie-break as a host-trusted, unverifiable step in the risks section."
+    },
+    {
+      "issue": "Player-count tuning at the 5-player bound can produce degenerate games. buildRoleBag's mafiaCount formula is unspecified; with 5 players and 2 mafia, 'mafia wins when mafia >= town' becomes true after a single successful night kill (2 mafia vs 2 living town), so the game can end on night 1 with no meaningful day play.",
+      "severity": "minor",
+      "fix": "Specify the mafiaCount formula per player count and enforce a minimum town-to-mafia buffer (e.g. town >= mafia+1 at start), and document the 5-6 player edge so the first-night outcome cannot instantly end the game."
+    },
+    {
+      "issue": "sanitizeName's bidi stripping is incomplete for RTL spoofing. It strips U+202A–202E and U+2066–2069 but not LRM (U+200E), RLM (U+200F), or ALM (U+061C), which can still manipizes ordering/display in an LTR document containing Arabic names (the project's stated i18n case).",
+      "severity": "minor",
+      "fix": "Also strip or isolate U+200E, U+200F, U+061C (and ideally all Cf/format marks except explicitly allowed ones) in sanitizeName/sanitizeChat, or wrap every user string in Unicode isolates at render time as the spec already hints via dir=auto."
+    }
+  ],
+  "strengths": [
+    "Allowlist redaction via one pure redact(state, viewer) function with the host's own player UI routed through the same path is the right architecture: omission is the safe default and a client can only hold what it was sent.",
+    "Deriving all authoritative identity (role, isModerator, isAlive, publicId) from the host's peer-connection->seat map and ignoring client-declared identity correctly closes the classic 'self-declare isModerator/seat' exploit.",
+    "Per-seat detective results and per-role privateNotes (no shared global results array, dawn carries only public killedId/saved) correctly prevents the most common secret-leak patterns.",
+    "Fixed-length night/vote windows plus single-event-loop-turn fanout and private acks are a sound, concrete mitigation for timing/ordering side channels, and the design correctly treats DTLS-ordered delivery plus full-snapshot views as making dropped intermediate views harmless.",
+    "Various Babel: CSPRNG role assignment with rejection sampling and dual independent shuffles, opaque 64-bit publicIds, and lobby-order pinning of the public board collectively remove index/order/role correlations, and the commit-reveal proof gives genuine post-game verifiability of the deal.",
+    "SessionStorage (not localStorage) seat tokens with 256-bit entropy, plus treating token mismatch as spectator, is a reasonable reconnect-seat design.",
+    "The trust-model section is honest about host-as-trust-root, off-channel collusion, shoulder-surfing, and moderator-device surface rather than claiming to solve them; the risk list also proactively names the dead-channel mafia leak.",
+    "XSS/i18n defenses (textContent-only rendering, no innerHTML/eval, symbol-keyed i18n dictionaries, CSP with no inline scripts, dir=auto + isolation) are appropriate for attacker-controlled names and chat."
+  ],
+  "verdict": "sound-with-fixes"
+}

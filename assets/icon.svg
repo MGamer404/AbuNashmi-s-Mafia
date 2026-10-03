@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="AbuNashmi's Mafia">
+  <title>AbuNashmi's Mafia</title>
+  <defs>
+    <linearGradient id="card" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#26314c"/>
+      <stop offset="0.6" stop-color="#141a2a"/>
+      <stop offset="1" stop-color="#0b0f18"/>
+    </linearGradient>
+    <linearGradient id="hat" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff6b5e"/>
+      <stop offset="1" stop-color="#c02f2f"/>
+    </linearGradient>
+    <linearGradient id="band" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e0a940"/>
+      <stop offset="1" stop-color="#b8862c"/>
+    </linearGradient>
+    <pattern id="weave" width="16" height="16" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="16" height="16" fill="none"/>
+      <path d="M0 0 L0 16" stroke="#ffffff" stroke-opacity="0.05" stroke-width="8"/>
+    </pattern>
+    <clipPath id="cardClip">
+      <rect x="76" y="46" width="360" height="420" rx="46"/>
+    </clipPath>
+  </defs>
+
+  <!-- The card -->
+  <g transform="rotate(-7 256 256)">
+    <rect x="76" y="46" width="360" height="420" rx="46" fill="url(#card)"/>
+    <rect x="76" y="46" width="360" height="420" rx="46" fill="url(#weave)" clip-path="url(#cardClip)"/>
+    <rect x="76" y="46" width="360" height="420" rx="46"
+          fill="none" stroke="#e0a940" stroke-opacity="0.55" stroke-width="5"/>
+    <rect x="94" y="64" width="324" height="384" rx="34"
+          fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="2"/>
+  </g>
+
+  <!-- Corner pips, as on a real playing card -->
+  <g fill="#e0a940" fill-opacity="0.75">
+    <circle cx="122" cy="96" r="9"/>
+    <circle cx="390" cy="418" r="9"/>
+  </g>
+
+  <!-- Fedora silhouette -->
+  <g transform="translate(0,6)">
+    <!-- brim -->
+    <ellipse cx="256" cy="330" rx="152" ry="34" fill="url(#hat)"/>
+    <!-- crown -->
+    <path d="M156 330
+             C156 250 172 186 256 176
+             C340 186 356 250 356 330
+             Z" fill="url(#hat)"/>
+    <!-- crown crease -->
+    <path d="M232 178 C244 206 268 206 280 178" fill="none"
+          stroke="#7d1f1f" stroke-opacity="0.55" stroke-width="7" stroke-linecap="round"/>
+    <!-- band -->
+    <path d="M163 288 C200 306 312 306 349 288 L349 316 C312 334 200 334 163 316 Z"
+          fill="url(#band)"/>
+  </g>
+</svg>

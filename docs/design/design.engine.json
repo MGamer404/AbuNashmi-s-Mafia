@@ -1,0 +1,302 @@
+{
+  "title": "Game Engine State Machine — Pure Reducer Design",
+  "summary": "The engine is a single pure reducer, reduce(state, action) -> {state, effects}, that serves automated and host-moderated modes identically. The central abstraction is the PendingAction slot: every decision phase (kill, protect, investigate, vote, runoff) opens a slot that collects player submissions and/or a moderator override, then collapses to a single immutable Resolution. Downstream resolution logic reads only Resolution and never the source, so the engine literally cannot tell whether players tapped or the mod typed. Advancement is data, not code: each phase carries an AdvancePolicy whose deadline lives in state, so switching modes mid-phase cancel/rearms a number and cannot corrupt anything. Time arrives only via action.at and randomness only via a seeded PRNG stored in state, giving full replay determinism. Secret data never enters broadcast effects; per-client views are produced by projectState(state, viewerId), which is the engine-level anti-cheat boundary.",
+  "decisions": [
+    {
+      "topic": "Unifying player actions and moderator entry",
+      "choice": "Introduce a PendingAction slot per decision phase, holding submissions (actor->Choice) and an optional override (mod Choice), plus a resolvePolicy. A pure resolvePending(slot) collapses them into a Resolution {targetId, outcome, tally, authors}. All rules downstream read only slot.resolution.",
+      "rationale": "Makes the two input channels structurally identical at the point where rules apply. The engine cannot branch on 'who decided' by construction, so moderated 'players act' and 'mod enters everything' need zero special-casing in night/vote logic.",
+      "rejected": "Two parallel code paths (applyPlayerKill / applyModKill) that must be kept in sync — guaranteed drift and double implementation of every rule."
+    },
+    {
+      "topic": "Override vs player submission priority",
+      "choice": "resolvePolicy: 'OVERRIDE_FIRST' (default) uses the override when present, else aggregates submissions; 'OVERRIDE_ONLY' ignores submissions; 'PLAYERS_ONLY' ignores override. Default OVERRIDE_FIRST.",
+      "rationale": "A moderator typing a value mid-phase should win over stale taps, and this must be a policy knob rather than a branch in the resolver. Live-switching styles mid-phase keeps both artifacts but resolution stays deterministic.",
+      "rejected": "Merging the mod's entry into the same submissions map weighted as one voter — breaks when players already voted and produces surprising plurality outcomes."
+    },
+    {
+      "topic": "Advance policy representation",
+      "choice": "AdvancePolicy = {mechanism: AUTO_ON_TIMER|WAIT_FOR_MOD|MANUAL, durationMs, deadline, remainingMs}. deadline is an absolute timestamp held in state; the runtime owns the actual setTimeout and only dispatches {type:'TICK', at}.",
+      "rationale": "Keeps the reducer pure (no timers, no Date.now) and makes an in-flight timer a plain number that can be cancelled or re-armed atomically. Also survives background-tab throttling: any late action can carry an overdue tick.",
+      "rejected": "setTimeout inside the engine — non-deterministic, untestable in Node, and impossible to cancel cleanly when the mod advances early."
+    },
+    {
+      "topic": "Mid-game mode and sub-style switching",
+      "choice": "SET_HOST_MODE and SET_MOD_STYLE mutate config only. On AUTO->WAIT they set remainingMs=deadline-at then deadline=null; on WAIT->AUTO they set deadline=at+remainingMs. Slot contents are never cleared.",
+      "rationale": "Switching policy is a state edit, not a rebuild. Preserving remainingMs avoids restarting a full timer, and preserving submissions/override means a host can take over mid-vote without losing progress or corrupting night state.",
+      "rejected": "Rebuilding state from scratch on mode change — discards in-flight decisions and makes the transition non-reversible."
+    },
+    {
+      "topic": "Night resolution order of operations",
+      "choice": "Fixed order in NIGHT_RESOLVE: (1) freeze both slots, (2) resolve KILL, (3) resolve PROTECT, (4) deliver INVESTIGATE result privately, (5) deaths = killTarget if alive and killTarget !== protectTarget, (6) apply first-night-no-kill override, (7) emit announcements.",
+      "rationale": "One deterministic sequence removes ambiguity about whether a save or a simultaneous detective result applies. Investigation resolving before deaths means a detective killed the same night still receives their finding.",
+      "rejected": "Applying deaths before protection/investigation — lets a dead doctor's save count and strips a dying detective of their result."
+    },
+    {
+      "topic": "Protection legality",
+      "choice": "Self-protect allowed (default). Protecting the same target two nights in a row is illegal: a player submission targeting last night's save is rejected with a private error; a mod override that violates the rule is recorded as outcome ABSTAIN (no protection).",
+      "rationale": "The engine must enforce classic rules even against the moderator, otherwise 'mod enters everything' bypasses a core constraint. Rejecting rather than silently re-pointing keeps the mod informed.",
+      "rejected": "Trusting the mod's typing and only validating player submissions — a mod typo then makes an illegal save silently succeed."
+    },
+    {
+      "topic": "Mafia target legality and no-submit",
+      "choice": "Mafia may not target a fellow Mafia (default; configurable). Invalid or no submission within the timer resolves to NO_KILL. Config mafiaNoSubmit = NO_KILL|RANDOM_VICTIM, default NO_KILL.",
+      "rationale": "Prevents self-destruction plays and gives a defined, deterministic outcome when the mafia stall. Random victim is opt-in because it changes game feel.",
+      "rejected": "Forcing a random victim on timeout — surprises players and rewards stalling as a way to dodge responsibility."
+    },
+    {
+      "topic": "First-night-no-kill",
+      "choice": "Config firstNightNoKill (default true). When set, NIGHT_RESOLVE forces kill resolution to NO_KILL while still running doctor and detective slots.",
+      "rationale": "Honours the common house rule while keeping the diagnostic roles active on night one, which most tables expect.",
+      "rejected": "Skipping the entire night phase — wastes the detective/doctor turns and changes information pacing."
+    },
+    {
+      "topic": "Voting rules as config",
+      "choice": "Vote config block: voters = alive only; allowSelfVote (default false); allowAbstain (default true); changeableUntilDeadline (default true, else lock on cast); majorityRule = PLURALITY (default) | ABSOLUTE; voteVisibility = PUBLIC (who voted whom) | SECRET (tally only); tiePolicy = NO_ELIMINATION (default) | RUNOFF | RANDOM.",
+      "rationale": "Every debated house rule is a flag rather than a fork in code; defaults match classic tabletop.",
+      "rejected": "Hard-coding one voting dialect — the brief explicitly calls ties and visibility configurable."
+    },
+    {
+      "topic": "Runoff mechanics",
+      "choice": "DAY_RUNOFF re-opens a vote slot whose targetSpace is only the tied top candidates. All alive players may vote (config runoffVoters = ALL|NON_TIED). A second tie resolves per tiePolicy (NO_ELIMINATION default).",
+      "rationale": "A runoff is just a PendingAction with a restricted targetSpace, so it reuses the entire vote pipeline with no new logic.",
+      "rejected": "Special-case runoff code — duplicates aggregation, tie and deadline handling."
+    },
+    {
+      "topic": "Detective results and death",
+      "choice": "Investigation returns exactly 'Mafia' or 'Not Mafia' for a living target, stored in state.detectiveKnowledge[detectiveId]. A dead detective cannot act. Accumulated findings are NOT revealed on death (default; optional revealDetectiveOnDeath).",
+      "rationale": "Standard classic behaviour; keeping findings private preserves the informational asymmetry that makes the role matter.",
+      "rejected": "Broadcasting all findings on death — turns the detective into a walking information piñata and distorts balance."
+    },
+    {
+      "topic": "Win condition timing",
+      "choice": "evaluateWin is invoked immediately on every death event (night kill, elimination) and again at the CHECK_WIN gate. Predicates: all Mafia dead -> TOWN; aliveMafia >= aliveTown -> MAFIA; aliveMafia>0 && no town can act -> MAFIA; stalemate rounds exceeded -> DRAW.",
+      "rationale": "Immediate evaluation prevents the game from continuing into a day phase after the last mafia already died at night (or mafia reached parity at night), which end-of-phase-only checking would wrongly allow.",
+      "rejected": "Checking only at phase boundaries — a phase of dead-but-playing turns leaks and can let a losing side act."
+    },
+    {
+      "topic": "Explicit stalemate/draw rule",
+      "choice": "Track consecutive rounds with no night death AND no day elimination. When it reaches config maxStalemateRounds (default 3), winner = DRAW. Also expose it so perpetually-abstaining mafia cannot stall forever.",
+      "rationale": "The brief demands an explicit draw rule; a counter is the only way to terminate genuine no-progress loops without arbitrary randomness.",
+      "rejected": "No draw rule — the 1-mafia-vs-1-doctor-style locked board could hang forever."
+    },
+    {
+      "topic": "Determinism and injection",
+      "choice": "reduce(state, action) is fully pure. Seed and PRNG state live in state (mulberry32); every time-sensitive action carries at; the reducer never calls Date.now() or Math.random(). Runtime services (clock, transport, timers) are passed to createInitialState/adapters, not read inside reduce.",
+      "rationale": "A seeded reducer replays identically from (initialState, actionLog), enabling headless Node unit tests of every rule and reproducible tiebreaks.",
+      "rejected": "Injecting random()/now() as a live callback into reduce — testable only with mocks and still non-replayable from a log."
+    },
+    {
+      "topic": "Effects and the anti-cheat boundary",
+      "choice": "reduce emits declarative effects: PUBLIC, PRIVATE {to}, SET_TIMER, CLEAR_TIMER, GAME_OVER, LOG. Clients never receive raw state; the host sends projectState(state, viewerId), which strips role, knowledge and slot internals for everyone but the owner.",
+      "rationale": "Secret data failing to appear in a broadcast/passive view means devtools on a hostile client can learn nothing the player is not entitled to.",
+      "rejected": "Broadcasting full state and hiding it with CSS — a cheater reads roles straight from the network/devtools."
+    },
+    {
+      "topic": "Phase skipping",
+      "choice": "On entering a role's night/act phase, if no living player holds that role, the phase auto-transitions to the next in a single reducer step and emits no timer.",
+      "rationale": "Keeps the transition table total without dead phases stalling automated games when a doctor or detective is dead.",
+      "rejected": "Always running the phase with an empty actor set — wastes timer duration and confuses players with a silent wake-up call."
+    },
+    {
+      "topic": "Stale and duplicate action rejection",
+      "choice": "Every decision action carries phaseId; the reducer rejects any action whose phaseId != state.phaseId (idempotently, with no state change). Slots are write-once to RESOLVED; later submissions are ignored.",
+      "rationale": "Guarantees out-of-order WebRTC delivery and reconnects cannot rewind or double-apply a phase.",
+      "rejected": "Trusting arrival order — flaky Wi-Fi reorders messages and would corrupt tallies."
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "reduce",
+      "signature": "reduce(state: GameState, action: Action): { state: GameState, effects: Effect[] }",
+      "purpose": "The single entry point. Pure, synchronous, no I/O, no clock, no RNG. Returns the next state plus declarative effects for the runtime to execute."
+    },
+    {
+      "name": "GameState",
+      "signature": "{ version, roomId, config: GameConfig, phase: Phase, round: number, phaseId: string, players: Record<PlayerId, Player>, slot: PendingAction|null, night: { kill: Resolution|null, protect: Resolution|null, investigate: {detectiveId, targetId, result}|null, deaths: PlayerId[] }, vote: PendingAction|null, detectiveKnowledge: Record<PlayerId, Finding[]>, doctorHistory: Record<PlayerId, PlayerId|null>, advance: AdvancePolicy, hostMode: 'AUTOMATED'|'MODERATED', modStyle: 'PLAYERS_ACT'|'MOD_ENTERS', win: WinResult|null, stalemate: number, rng: number, log: AuditEntry[] }",
+      "purpose": "Fully serializable game state; contains everything needed to resume/replay and nothing non-deterministic."
+    },
+    {
+      "name": "Player",
+      "signature": "{ id: PlayerId, name: string, role: 'VILLAGER'|'MAFIA'|'DOCTOR'|'DETECTIVE', alive: boolean, connected: boolean, seat: number, revealed: boolean, lastWords: string|null }",
+      "purpose": "A seat at the table; role is secret and only ever projected to its owner."
+    },
+    {
+      "name": "PendingAction",
+      "signature": "{ kind: 'KILL'|'PROTECT'|'INVESTIGATE'|'VOTE'|'RUNOFF'|'ELIMINATE'|'LAST_WORDS', phaseId: string, eligible: PlayerId[], targetSpace: PlayerId[], submissions: Record<PlayerId, Choice>, override: Choice|null, aggregate: 'PLURALITY'|'SINGLE'|'LAST', resolvePolicy: 'OVERRIDE_FIRST'|'OVERRIDE_ONLY'|'PLAYERS_ONLY', status: 'OPEN'|'RESOLVED', resolution: Resolution|null }",
+      "purpose": "THE unification point: one shape for player taps and mod entry across every decision phase."
+    },
+    {
+      "name": "Choice",
+      "signature": "{ targetId: PlayerId|null, abstain?: boolean }",
+      "purpose": "A single actor's decision. targetId=null encodes abstain/no-kill."
+    },
+    {
+      "name": "Resolution",
+      "signature": "{ targetId: PlayerId|null, outcome: 'CHOSEN'|'ABSTAIN'|'NO_KILL'|'NO_ELIMINATION'|'TIE', tally: Record<PlayerId, number>, authors: { players: PlayerId[], mod: boolean } }",
+      "purpose": "The normalized decision consumed by all rule logic; authors is audit/reveal metadata only and is never branched on by rules."
+    },
+    {
+      "name": "resolvePending",
+      "signature": "resolvePending(slot: PendingAction, rng: number): { resolution: Resolution, rng: number }",
+      "purpose": "Pure collapse of submissions/override into a Resolution per resolvePolicy + aggregate + tiebreak. Idempotent when already RESOLVED."
+    },
+    {
+      "name": "evaluateWin",
+      "signature": "evaluateWin(state: GameState): WinResult | null",
+      "purpose": "Predicate evaluated on every death and at the CHECK_WIN gate; returns TOWN/MAFIA/DRAW with a reason."
+    },
+    {
+      "name": "projectState",
+      "signature": "projectState(state: GameState, viewerId: PlayerId | 'MODERATOR' | 'SPECTATOR'): ClientView",
+      "purpose": "Redaction boundary. Emits only what that viewer may know (own role, own findings, public board); moderator sees all roles. Secret data never leaves the host."
+    },
+    {
+      "name": "assignRoles",
+      "signature": "assignRoles(playerIds: PlayerId[], config: GameConfig, rng: number): { roles: Record<PlayerId, Role>, rng: number }",
+      "purpose": "Seeded, deterministic role distribution validated against 5..20 players and mafia/town balance."
+    },
+    {
+      "name": "createInitialState",
+      "signature": "createInitialState(config: GameConfig, seed: number, hostServices: HostServices): GameState",
+      "purpose": "Builds the LOBBY state; the only place external services (clock, id gen) are wired in, never inside reduce."
+    },
+    {
+      "name": "Action",
+      "signature": "type Action = {type:'CREATE',config,at} | {type:'JOIN',player,at} | {type:'LEAVE',playerId,at} | {type:'SET_READY',playerId,ready,at} | {type:'RECONNECT',playerId,connected,at} | {type:'START',at} | {type:'SUBMIT',playerId,slot,choice,phaseId,at} | {type:'RETRACT',playerId,slot,phaseId,at} | {type:'MOD_OVERRIDE',slot,choice,phaseId,at} | {type:'MOD_CONFIG',patch,at} | {type:'SET_HOST_MODE',mode,at} | {type:'SET_MOD_STYLE',style,at} | {type:'SET_ADVANCE_POLICY',policy,durationMs?,at} | {type:'ADVANCE',actor,at} | {type:'TICK',at} | {type:'LAST_WORDS',playerId,text,at} | {type:'SKIP_LAST_WORDS',playerId,at} | {type:'REMATCH',at}",
+      "purpose": "Closed action union; every decision action carries phaseId so stale/out-of-order messages are rejected."
+    },
+    {
+      "name": "Effect",
+      "signature": "type Effect = {type:'PUBLIC',event} | {type:'PRIVATE',to:PlayerId,event} | {type:'SET_TIMER',deadline:number} | {type:'CLEAR_TIMER'} | {type:'GAME_OVER',win:WinResult} | {type:'LOG',entry}",
+      "purpose": "Declarative output the runtime interprets; keeps the engine free of DOM/network and segregates secret from public data."
+    },
+    {
+      "name": "Phase / transition table",
+      "signature": "LOBBY -START-> ROLE_DEAL -> NIGHT_MAFIA -> [NIGHT_DOCTOR] -> [NIGHT_DETECTIVE] -> NIGHT_RESOLVE -> CHECK_WIN -> DAY_ANNOUNCE -> DAY_DISCUSS -> DAY_VOTE -> (DAY_RUNOFF) -> DAY_ELIMINATE -> LAST_WORDS -> CHECK_WIN -> NIGHT_MAFIA | ENDED; ENDED -REMATCH-> LOBBY",
+      "purpose": "Every legal transition; bracketed phases auto-skip when the role is absent/dead; CHECK_WIN is a transient gate that yields ENDED on win."
+    }
+  ],
+  "edgeCases": [
+    {
+      "scenario": "All mafia abstain or fail to submit before the timer expires",
+      "handling": "KILL resolves to NO_KILL (default) or a seeded RANDOM_VICTIM per config; announcement is 'Nobody died'."
+    },
+    {
+      "scenario": "Mafia target the Doctor's protected player (including self-protect)",
+      "handling": "Deaths set is empty; public announcement is only 'Nobody died' — the save is never revealed (config revealSave)."
+    },
+    {
+      "scenario": "Doctor tries to protect the same target two nights consecutively",
+      "handling": "Player submission rejected with a private error and does not count; a mod override violating it resolves to ABSTAIN (no protection)."
+    },
+    {
+      "scenario": "A mafia submits a fellow mafia as the kill target",
+      "handling": "Illegal by default (allowMafiaKillMafia=false); the submission is rejected. If it is the only submission, KILL falls back to NO_KILL."
+    },
+    {
+      "scenario": "Detective is killed on the same night they investigate",
+      "handling": "Investigation resolves before deaths, so the finding is delivered privately; the detective then dies and cannot act again."
+    },
+    {
+      "scenario": "Last mafia is killed at night",
+      "handling": "evaluateWin fires immediately in NIGHT_RESOLVE; the game goes straight to ENDED with TOWN win, skipping the day phase."
+    },
+    {
+      "scenario": "Night kill brings mafia count to parity with town",
+      "handling": "evaluateWin fires immediately after deaths; MAFIA wins before DAY_ANNOUNCE runs."
+    },
+    {
+      "scenario": "Vote ends with a tie",
+      "handling": "Per tiePolicy: NO_ELIMINATION (default) proceeds with no elimination, RUNOFF opens a restricted-target PendingAction, RANDOM picks via seeded PRNG (deterministic and replayable)."
+    },
+    {
+      "scenario": "Runoff ties again",
+      "handling": "tiePolicy is applied a second time; default NO_ELIMINATION ends the day with no elimination."
+    },
+    {
+      "scenario": "Everyone abstains or no one votes by the deadline",
+      "handling": "VOTE resolves to NO_ELIMINATION; stalemate counter increments."
+    },
+    {
+      "scenario": "A player tries to vote for themselves",
+      "handling": "Rejected when allowSelfVote=false; a mod override for self is also rejected and treated as abstain."
+    },
+    {
+      "scenario": "A voter changes their vote before the deadline",
+      "handling": "Allowed when changeableUntilDeadline=true (last-write-wins in submissions); otherwise the first vote locks and later submits are ignored."
+    },
+    {
+      "scenario": "Dead player attempts to act or vote",
+      "handling": "not in slot.eligible -> action rejected with no state change."
+    },
+    {
+      "scenario": "Moderator overrides after players have already voted",
+      "handling": "resolvePolicy OVERRIDE_FIRST makes the override the Resolution; submissions are retained for audit only."
+    },
+    {
+      "scenario": "Mode switched AUTO->WAIT_FOR_MOD while a timer is in flight",
+      "handling": "remainingMs = deadline - at is stored and deadline=null; runtime emits CLEAR_TIMER. No phase data is lost."
+    },
+    {
+      "scenario": "Mode switched WAIT->AUTO mid-phase",
+      "handling": "deadline = at + remainingMs (full duration if never armed); runtime emits SET_TIMER. The phase does not restart."
+    },
+    {
+      "scenario": "Mod style switched MOD_ENTERS->PLAYERS_ACT mid-vote",
+      "handling": "Existing override is kept; the slot accepts new player submissions again; resolution still follows resolvePolicy deterministically."
+    },
+    {
+      "scenario": "ACTION arrives for a phase that already ended (out-of-order Wi-Fi)",
+      "handling": "phaseId mismatch -> rejected idempotently, no state change, optional LOG effect."
+    },
+    {
+      "scenario": "Duplicate SUBMIT arrives after the slot resolved",
+      "handling": "slot.status=RESOLVED -> ignored; resolution is immutable."
+    },
+    {
+      "scenario": "TICK arrives late (background-tab throttling)",
+      "handling": "TICK only checks at >= deadline; any overdue action can carry a tick, so the phase advances correctly regardless of throttle."
+    },
+    {
+      "scenario": "Player disconnects during a voting phase",
+      "handling": "RETENTION: connected=false; they remain eligible until the phase resolves, so a reconnect within the window can still submit. Optional mod auto-abstain."
+    },
+    {
+      "scenario": "Game reaches a no-progress loop (no night death, no elimination) for maxStalemateRounds",
+      "handling": "evaluateWin returns DRAW and transitions to ENDED with an explicit reason string."
+    },
+    {
+      "scenario": "1 mafia vs 1 doctor with no productive kill",
+      "handling": "aliveMafia >= aliveTown (1>=1) fires MAFIA win immediately; the stalemate/draw rule covers only cases that stay below parity."
+    },
+    {
+      "scenario": "Role absent or dead at its wake-up phase",
+      "handling": "Phase auto-skips in one reducer step with no timer and no PUBLIC/PRIVATE wake event."
+    },
+    {
+      "scenario": "First-night-no-kill is enabled",
+      "handling": "KILL is forced to NO_KILL while PROTECT and INVESTIGATE still run and deliver normally."
+    },
+    {
+      "scenario": "A moderator typos an override target that does not exist",
+      "handling": "Override is validated against targetSpace; invalid target is rejected with a private error and the slot stays OPEN."
+    },
+    {
+      "scenario": "A client opens devtools to read roles or detective findings",
+      "handling": "That data is never in any broadcast/passive payload; projectState omits role and detectiveKnowledge for every viewer except the owner (or moderator)."
+    }
+  ],
+  "risks": [
+    "Timer correctness depends on the runtime dispatching TICK; if the host tab sleeps and no further action arrives, auto-advance can stall until the next action — mitigate with a capped interval and an overdue-tick check on every dispatch.",
+    "Moderator overrides are trusted input; a wrong-but-legal override (e.g., killing the wrong player) cannot be distinguished from an intended one by the engine, so the UI must require confirmation for irreversible overrides.",
+    "The stalemate counter must count only genuine no-progress rounds (no night death AND no elimination), otherwise an early-town-no-kill strategy could trigger an unintended draw.",
+    "phaseId ordering must survive the transport layer's possible reordering and reconnect replay; if the transport ever synthesizes actions, it must preserve phaseId or the reducer will silently drop legitimate input.",
+    "Immediate win evaluation on death events must also flush the DECISION slots for the current phase, or a game can transition to ENDED while a slot is still OPEN and produce confusing late private effects.",
+    "The mod ActionSlot projection gives the moderator every role; if the moderation channel is not authenticated, a player spoofing the moderator id could read all roles — the engine relies on the transport for moderator authentication.",
+    "RANDOM tiebreak and RANDOM_VICTIM are only reproducible if the PRNG state is advanced identically for all clients; any client-side randomness would desynchronize replays and reveal bias.",
+    "Dead-but-connected players become spectators; if 'stay silent' config is off, the transport must gate their chat, which is outside the pure engine's reach.",
+    "Phase skipping when a role is dead means the number of night slots varies per game; tests and the UI must not assume all four night phases always occur.",
+    "Keeping player submissions after a mod override for audit could leak intent if any projection accidentally includes slot.submissions — projectState must strip raw submissions and expose only the Resolution."
+  ]
+}

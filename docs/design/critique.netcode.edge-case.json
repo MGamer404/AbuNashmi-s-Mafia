@@ -1,0 +1,100 @@
+{
+  "problems": [
+    {
+      "issue": "Host-reload recovery is self-defeating: 'Host disconnect handling' promises the host can reload within 120s and resume, but createHost() treats peerjs error 'unavailable-id' as a collision and DISCARDS the code, re-rolling a fresh one. On a reload the stale broker lease for 'anm-<code>' is exactly what causes 'unavailable-id', so the recovery path regenerates a new code while every guest is still retrying the OLD host peer id for 120s. The host comes back on a code nobody knows; the game cannot resume.",
+      "severity": "fatal",
+      "fix": "Split the two cases. Persist the current room code with host state in localStorage. On reload, first attempt to reclaim the SAME derived id with backoff for a bounded window (do NOT re-roll on 'unavailable-id'), since the old lease releases; only re-roll on a fresh room creation. Never change the code while any guest could be holding it."
+    },
+    {
+      "issue": "Snapshot seq reset on host reload permanently soft-locks guests. Snapshot application is 'apply only if seq > lastAppliedSeq', and seq is the host's per-sender counter. The spec persists 'full state' to localStorage but never says the seq counter is persisted. If it restarts at 0/1 after a reload, returning guests (whose lastAppliedSeq is high) discard every subsequent snapshot forever and freeze on stale state.",
+      "severity": "fatal",
+      "fix": "Persist the host seq counter in the same localStorage blob as the game state, and have 'welcome' carry the current host seq so a rejoining guest can reset lastAppliedSeq to the baseline it was told (accept the first snapshot after a welcome unconditionally, or key freshness on an epoch/hostEpoch that changes on reload)."
+    },
+    {
+      "issue": "Role leakage via broadcast events contradicts the secrecy boundary. The 'event' interface is explicitly host->all and lists 'deal' and 'reveal' as event types. A dealt card / role reveal naming a role sent to EVERY guest means any player can read every role in devtools - the exact CRITICAL constraint the spec swears is impossible 'by construction'.",
+      "severity": "fatal",
+      "fix": "Never carry role/secret data in a broadcast event. Drive the deal/flip animation from the recipient's own redacted snapshot (which already contains their role), or send per-recipient deal/reveal via sendTo(playerId,...). State in the event interface that 'deal'/'reveal' are per-recipient-only and must be redacted."
+    },
+    {
+      "issue": "Mafia night-kill consensus is undefined when several mafia act at once. Rules say 'Mafia (all mafia together) choose a victim', but the action model records each mafia's 'nightKill' independently and only dedups by message id. With 2+ mafia selecting different targets in the same instant, behaviour is unspecified: last-write-wins silently, both recorded, or ambiguous tally. The redacted snapshot shows mafia their living teammates but NOT teammates' pending targets, so they cannot even see the conflict.",
+      "severity": "major",
+      "fix": "Define a mafia-group resolution rule (e.g., a mafia-private consensus vote with visible pending target and the same tally/tie logic as the day vote, or an explicit last-write-wins per group with the group's current target shown to all mafia in the snapshot). Document it and test 2-4 mafia concurrently."
+    },
+    {
+      "issue": "Vote (and night action) quorum can stall when a participant is disconnected. In HOST-MODERATED sub-style (a) the moderator advances phases manually and there is no timer; if the host waits for all living players to vote and one is in 'unresponsive/disconnected' limbo, the phase never closes and the game soft-locks. Even in AUTOMATED mode, if 'all votes in' is required rather than the deadline, a silent disconnected voter stalls the vote until the (possibly minutes-long) deadline.",
+      "severity": "major",
+      "fix": "Make vote resolution always terminate: close on (a) all LIVING connected players voted, or (b) the phase deadline/timer, whichever first, and define that disconnected voters count as abstain. In moderated mode, keep a bounded fallback (moderator can force-close, plus an unresponsive-player auto-exclusion)."
+    },
+    {
+      "issue": "Moderator disconnect in HOST-MODERATED mode deadlocks the room with no exit state. The moderator is the sole phase driver in both sub-styles, yet there is no moderator liveness/grace/reconnect handling, no host promotion (deliberately rejected), and no host-side timer fallback in moderated mode. If the mod's phone locks or drops, nothing can advance the phase and there is no defined recovery.",
+      "severity": "major",
+      "fix": "Add moderator slot lifecycle identical to player slots (token, grace, reattach), and define a fallback: e.g., the authoritative host device can always advance/override, or a bounded auto-advance kicks in if the moderator goes silent, with a clear 'moderator reconnecting' overlay for players."
+    },
+    {
+      "issue": "Heartbeat thresholds produce false 'host unreachable' storms precisely in the spec's known worst case. Guests flag host silence at 20s and attempt reconnect at 35s, but the host is explicitly the device most likely to be throttled (iOS lock, no wakeLock). A backgrounded host sends pings at most once/minute, so every guest crosses the 20s/35s thresholds and starts churning reconnects even though the DataChannel and host are alive.",
+      "severity": "major",
+      "fix": "Base host-liveness on channel state + a much longer silence threshold (or on SCTP-level keepalive), and when the host has self-reported a visibilitychange/hidden transition, suspend guest reconnect escalation. Distinguish 'laggy' from 'gone' without a 20s tripwire on a throttle-prone node."
+    },
+    {
+      "issue": "Live sub-style switch mid-phase has undefined reconciliation. The moderator may switch 'players act' <-> 'mod enters everything' 'at any phase'. If players have already submitted a partial vote or night action and the mod switches to manual entry (or back), the spec never says whether pending submissions are kept, discarded, or merged with the mod's typed tally - information loss or double-counting is possible.",
+      "severity": "major",
+      "fix": "Define switch semantics explicitly: on switch, stamp the phase with a sub-style/version, reject any in-flight actions from the prior sub-style, and either freeze-and-preserve already-recorded outcomes or explicitly discard them. Make the chosen authority unambiguous per phase."
+    },
+    {
+      "issue": "HostSession API cannot express 'mod enters everything'. The interface offers only advancePhase(), setModerator(), end(); there is no method for a moderator to submit a night outcome (who died / who was saved) or a day vote tally, which is the core of sub-style (b). 'Players act' can ride the 'action' message, but manual outcome entry has no defined wire path or host API.",
+      "severity": "major",
+      "fix": "Add explicit host surface, e.g., moderator action kinds ('setNightOutcome', 'setVoteTally', 'setLastWords') validated against moderator identity and phase, or extend the 'action' envelope with a moderator-origin variant. Implement and document it."
+    },
+    {
+      "issue": "deadlineAt is treated as always present, but HOST-MODERATED phases have no timer. The clock/timer section says 'Each phase carries an absolute host deadline deadlineAt', and guest rendering is remaining = deadlineAt - (now+offset). In moderated mode phases advance manually, so deadlineAt is null/undefined and the countdown UI computes NaN or absurd values (only partially guarded by the [0, phaseMax] clamp).",
+      "severity": "minor",
+      "fix": "Make deadlineAt optional per phase/mode; guests render a countdown only when present and otherwise show 'waiting for the moderator'. Contract: deadlineAt is non-null iff mode==='auto'."
+    },
+    {
+      "issue": "Doctor 'may not protect the same person twice in a row' requires persistent per-doctor memory that the spec never places in persisted state. If the host reloads (state restored from localStorage) or a doctor reconnects, the last-protected target must survive or the rule silently breaks and can be exploited.",
+      "severity": "minor",
+      "fix": "Include lastProtectedBy (per doctor) in the authoritative state that is persisted to localStorage, and validate protect targets against it on every receipt including post-reload."
+    },
+    {
+      "issue": "Chat sender identity is not server-stamped and all spectators collapse to one id. The 'chat' payload carries from: playerId|'spectator', but nothing says the host overwrites payload.from with the authenticated slot identity. A hostile guest can spoof any name/from, and every spectator shares from='spectator', so individual identity is lost.",
+      "severity": "minor",
+      "fix": "Host must set from from the authenticated slot (never trust the client field) and use the spectator's own playerId (or a spectator id) rather than a shared 'spectator' literal, then echo to the permitted audience."
+    },
+    {
+      "issue": "Unknown version (v>1) is silently ignored, so an upgraded host can leave old clients frozen with no signal. 'v>1 is ignored, never fatal' is good for additive growth but gives an old guest no way to know it must reload; it will sit on a stale snapshot indefinitely.",
+      "severity": "minor",
+      "fix": "On v>1 from the host, send a typed error (e.g., 'UPGRADE_REQUIRED') so the guest can show a reload prompt, while still ignoring genuinely unknown message types."
+    },
+    {
+      "issue": "ROOM_FULL 'guest UI offers to wait in case a seat frees' has no mechanism: guests never listen on an id and no polling/retry loop is specified, so a full-room guest cannot actually be notified or retry. The offer is dead UI.",
+      "severity": "minor",
+      "fix": "Define a retry/backoff loop that re-runs the hello handshake (or have the host keep a bounded wait-queue keyed by clientNonce and push a welcome when a seat frees), with a timeout and clear 'still full' feedback."
+    },
+    {
+      "issue": "'actions ≤1 per phase per kind' forbids changing a vote, contradicting classic Mafia (and many house rules) where a player may move their vote before the tally closes. Also 'per kind' is ambiguous about whether a second mafia's nightKill is a duplicate.",
+      "severity": "minor",
+      "fix": "Allow the latest valid vote per voter per phase (last-write-wins keyed by slot, not by message id), and state the dedup rule as identity-keyed rather than kind-count-keyed."
+    },
+    {
+      "issue": "ClockSync.observe signature/formula is garbled: 'offset=((t0? host pairing))' - the standard NTP estimator offset = tHost - (t0+t3)/2 is not stated, leaving the one place the whole countdown depends on under-specified (and asymmetric-delay bias unaddressed).",
+      "severity": "minor",
+      "fix": "Specify offset = tHost - (t0+t3)/2 with EWMA smoothing, discard samples with unusually high RTT, and note the symmetric-delay assumption."
+    },
+    {
+      "issue": "Identity durability vs the reconnection promise: player token lives in sessionStorage, which does not survive the tab/browser being fully closed (or iOS evicting the page under memory pressure). During the 120s host window a guest whose browser killed the tab cannot rejoin as itself, so its role is lost despite the slot being held - the persistence choice undercuts the recovery design.",
+      "severity": "minor",
+      "fix": "Document the tradeoff and consider a short-TTL localStorage record (or IndexedDB) scoped to roomCode that is cleared on game end/kick, so an accidental tab close can still reclaim a held seat within the grace window."
+    }
+  ],
+  "strengths": [
+    "Redaction-at-send-time is the correct architecture for the hostile-client constraint: if the host never serializes a secret to a peer, devtools on that peer reveals nothing. This is fundamentally sound (the only leak is the broadcast 'deal'/'reveal' event, which is an implementation slip, not an architectural one).",
+    "Full per-recipient redacted snapshots instead of deltas is the right call for a <10KB state over flaky Wi-Fi: idempotent, self-healing on reconnect, and it eliminates the ack/reorder/gap-recovery failure modes that surface exactly on bad links.",
+    "Absolute host deadlines plus guest clock-offset correction (recomputed on tick and visibilitychange, never accumulated) is a robust answer to tab throttling and skewed device clocks; only the host needs foreground reliability.",
+    "The star topology with an authoritative host and no guest-to-guest secret channels is correct for both the NodeA/battery budget at 20 players and the secrecy requirement - a mesh or guest relaying would force secrets onto untrusted peers.",
+    "Refusing host promotion is justified and consistent: no guest holds authoritative secrets, so promotion would require broadcasting them and would break the secrecy invariant. Freeze-and-reconnect is a reasonable trade for a party context.",
+    "Identity via a server-issued 128-bit token that is never broadcast is a clean, password-less way to rebind a locked phone to its slot while preventing seat spoofing; separating lobby grace (remove) from in-game grace (keep inert) correctly preserves role-count and win-condition invariants.",
+    "Handling the specific classic-Mafia edge cases (name collisions, confusable code characters, per-recipient redaction, out-of-order snapshot rejection, mid-night reconnect with no half-applied action, mixed RTL/LTR chat) shows the design anticipated most real-world failure modes.",
+    "PeerJS id namespacing under a fixed prefix, with Crockford normalization (I/L->1, O->0, separators stripped), meaningfully reduces cross-app collisions and typo failures for a human-shared 6-char code."
+  ],
+  "verdict": "sound-with-fixes"
+}

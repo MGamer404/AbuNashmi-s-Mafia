@@ -1,0 +1,275 @@
+{
+  "title": "Secret-Information Security & Anti-Cheat Design — AbuNashmi's Mafia",
+  "summary": "The authoritative GameState lives only in the host browser's memory and is never serialized to a non-moderator. Every guest receives a per-viewer ALLOWLIST projection built by a single pure function, redact(state, viewer), keyed on the viewer's seat resolved from the host's connection map — never from client-supplied fields. Each of the seven viewer classes (Villager, Mafia, Doctor, Detective, dead, spectator, moderator) gets a distinct projection; Mafia see teammates and a private channel but never Doctor/Detective, and Detective results are injected only into that detective's own view. Leak vectors are closed by fixed-length night/vote windows (no early phase end), single-tick fanout, opaque random publicIds, dual independent CSPRNG shuffles, a SHA-256 commit-reveal deal proof, 256-bit reconnect seat tokens, and strict epoch+seq message ordering. Client code holds no secrets, uses textContent-only rendering with a CSP and no eval/innerHTML, and the trust model honestly concedes host-cheating, off-channel collusion, and shoulder-surfing remain unpreventable.",
+  "decisions": [
+    {
+      "topic": "Redaction architecture",
+      "choice": "Host holds the ONE authoritative GameState in a closure; guests only ever receive a fresh allowlist-built ClientView. Nothing else crosses the wire.",
+      "rationale": "A single authority plus an allowlist projection (build exactly the fields the viewer may see) makes omission the safe default. Blacklist deletion (delete role then send) silently leaks when a new field is added later.",
+      "rejected": "Broadcasting full state and letting clients hide fields, or sending role-sorted/bulk state and redacting on the client — both let a devtools user read everything."
+    },
+    {
+      "topic": "Single redaction function",
+      "choice": "All client rendering — including the host's own player-facing UI — goes through redact(state, viewer). Only the moderator projection is a separate branch of the same function.",
+      "rationale": "One code path makes the visibility policy auditable and impossible to bypass from a stray render. The host's own player screen is redacted identically to a remote player's."
+    },
+    {
+      "topic": "Viewer classes and visibility table",
+      "choice": "Villager: own role only. Mafia: own role + mafiaTeam (id/name/alive) + private mafia channel; no Doctor/Detective info. Doctor: own role + own last-protected id. Detective: own role + own accumulated {round,targetId,verdict}. Dead player: own former role + public board + dead/spectator channel; no living roles. Spectator: public board only. Moderator: full ModeratorView (all roles, all night actions, verdicts, tally, pending submissions).",
+      "rationale": "Each class needs the minimum for play; secrets beyond that are pure cheat surface. Mafia coordination is the only cross-player secret legitimately shared."
+    },
+    {
+      "topic": "Mafia team visibility",
+      "choice": "mafiaTeam is populated in you.privateNotes only when viewer.role==='mafia', and a 'mafia' chat channel is delivered only to connected mafia viewers. Doctor and Detective identities are never included in any field.",
+      "rationale": "Mafia must coordinate at night, so mutual identity is required; revealing special roles to them would collapse the game."
+    },
+    {
+      "topic": "Detective result segregation",
+      "choice": "Results are stored per-detective (keyed by seat) and injected ONLY under that detective's you.privateNotes.detectiveResults. No shared/global results array exists in any broadcast. Dawn outcome carries only the public killedId/saved flag.",
+      "rationale": "A shared results list or a 'last investigation' field is the classic leak; per-seat injection makes the detective the sole recipient."
+    },
+    {
+      "topic": "Moderator confidentiality",
+      "choice": "ModeratorView is rendered/transmitted only to the authenticated moderator peer (or the host process if host==moderator). It is never included when isModerator is false. Default design: the room creator's browser is host AND moderator, so the role map never leaves the machine.",
+      "rationale": "The moderator panel is the richest secret store; keeping host==moderator means those secrets never traverse the network at all.",
+      "rejected": "A remote moderator device is supported only via an explicit moderatorToken, and it is documented as a new trusted-device attack surface."
+    },
+    {
+      "topic": "Never trust client-declared identity",
+      "choice": "The host derives role, isModerator, isAlive, and publicId from its own peer-connection→seat map. Client messages carry no authoritative identity; any role/isModerator/publicId fields in inbound payloads are ignored and stripped.",
+      "rationale": "Otherwise a player self-declares isModerator:true or a different seatId and reads the goldmine. Capabilities must be server-side."
+    },
+    {
+      "topic": "Fixed-length night (anti-timing)",
+      "choice": "Night lasts a configured nightDurationMs (default 45000, range 20000–120000) computed once when night opens; actions are collected but applied only at the deadline. The night NEVER ends early even if all actions arrive.",
+      "rationale": "Eliminates 'night ended the instant mafia submitted' and 'who caused the advance' side channels. Everyone shares one phaseEndsAt.",
+      "rejected": "Ending on all-actions-submitted, or per-action 'advance' events."
+    },
+    {
+      "topic": "Fixed vote window & tally policy",
+      "choice": "Vote runs a fixed voteDurationMs; individual votes are broadcast as they are cast only if the room enables liveVoteReveal. The tally closes at the deadline. Default liveTally=false: only final counts are revealed. If liveTally=true, counts are emitted in ~2s batches with jitter, never per-vote.",
+      "rationale": "Batched/final-only tallies remove per-vote timing correlation and reduce bandwagon artifacts."
+    },
+    {
+      "topic": "Simultaneous fanout",
+      "choice": "Phase-advance and deal messages are dispatched to every peer in a single event-loop turn; no peer receives an event earlier than another. Per-player action acks ('recorded') are private and carry no ordering information.",
+      "rationale": "Prevents a fast/slow mafia submission or a specific player from being inferable from the order peers are updated."
+    },
+    {
+      "topic": "Host clock in every view",
+      "choice": "Every ClientView includes serverNow (host ms epoch) and phaseEndsAt. Clients render countdowns from host time after estimating offset, not from their device clock.",
+      "rationale": "Stops a device with a skewed clock from inferring hidden events and makes timing claims consistent across clients."
+    },
+    {
+      "topic": "Opaque randomized player ids",
+      "choice": "Each seat gets a crypto-random publicId (64-bit hex). All messages and views reference publicId, never array indices or join sequence numbers.",
+      "rationale": "Removes any structural correlation between ordering and role and prevents index-guessing a victim/teammate."
+    },
+    {
+      "topic": "Role assignment RNG and shuffle",
+      "choice": "Roles assigned via Fisher-Yates using crypto.getRandomValues with rejection sampling (no modulo bias). Two independent shuffles: (1) shuffle the role bag, (2) shuffle the array of publicIds; then role[i] maps to publicId permutation[i].",
+      "rationale": "Math.random() is predictable and seeded observably; dual independent shuffles break any correlation between assignment order and public ordering so players[0] is not 'the mafia'.",
+      "rejected": "Math.random(), sorting by role, or assigning roles in join order."
+    },
+    {
+      "topic": "Board ordering",
+      "choice": "The public player list is ordered by lobby join order (or by publicId), pinned at join time and never re-sorted by role or by alive/mafia status.",
+      "rationale": "Even with opaque ids, a role-sorted list would visually cluster the mafia and leak them."
+    },
+    {
+      "topic": "Commit-reveal deal proof",
+      "choice": "At deal time the host computes commitment = SHA-256(canonicalJSON({rolesByPublicId, nonce})) and broadcasts the commitment (crypto.subtle.digest). At game over the host reveals {rolesByPublicId, nonce}; clients re-hash and compare.",
+      "rationale": "Constrains even a cheating host from retroactively changing the deal after the commitment is public, without a server or blockchain.",
+      "rejected": "Trusting the host to have dealt fairly with no verifiable record."
+    },
+    {
+      "topic": "Reconnect seat tokens",
+      "choice": "Host issues each seat a 256-bit crypto-random base64url seatToken over the DTLS data channel. Client stores it in sessionStorage keyed by roomCode; on reconnect it presents {roomCode, seatToken} and the host rebinds the new DataConnection to the existing seat. PeerJS peer ids are never used as tokens.",
+      "rationale": "256 bits makes guessing infeasible; rebinding restores role without a cheater stealing a seat. sessionStorage avoids persisting secrets on a shared device.",
+      "rejected": "Deriving tokens from peer id, join order, or Math.random; localStorage (persists and is readable later)."
+    },
+    {
+      "topic": "Message integrity & validation",
+      "choice": "Every host broadcast carries epoch (host boot id) + monotonic seq; clients drop seq<=lastSeq unless epoch changed (then full resync). Host validates every inbound message against a shape whitelist, checks capability legality (role+phase) and rate-limits (~20 msg/s), ignoring unknown fields/wrong-phase actions.",
+      "rationale": "Handles out-of-order/flaky Wi-Fi and forged or replayed actions without trusting the client."
+    },
+    {
+      "topic": "Post-game reveal",
+      "choice": "Only when phase==='gameOver' does redact() permit board.reveal = {publicId: Role} for all viewers, plus the dealProof (nonce + roles + commitment) for verification. Roles of players eliminated mid-game are revealed earlier only if revealOnElimination=true.",
+      "rationale": "Full transparency at the end lets everyone verify fairness without ever exposing secrets during play."
+    },
+    {
+      "topic": "Web/XSS hygiene",
+      "choice": "No eval, no new Function, no document.write, no innerHTML/insertAdjacentHTML with user data. All user strings rendered via element.textContent / createTextNode. sanitizeName caps 24 chars, NFC-normalizes, strips C0/C1 controls and bidi-override chars (U+202A–202E, U+2066–2069). sanitizeChat caps 400 chars. CSP meta: default-src 'self'; script-src 'self'; connect-src 'self' wss://<broker>; object-src 'none'; base-uri 'none'. No inline scripts.",
+      "rationale": "Chat/names are attacker-controlled; textContent makes HTML/script injection inert, and bidi stripping prevents RTL-name spoofing. CSP blocks inline-injection even if a sink is missed."
+    },
+    {
+      "topic": "i18n rendering safety",
+      "choice": "Both languages come from static dictionaries keyed by symbolic keys (e.g. phaseLabelKey); interpolation uses textContent with dir=auto and Unicode isolation on user-supplied names. No translation string is ever concatenated into HTML.",
+      "rationale": "Arabic RTL names in an English/LTR document must not be able to spoof other players or inject markup."
+    },
+    {
+      "topic": "Mafia kill resolution",
+      "choice": "Each alive mafia submits a kill target in players-act mode; plurality wins; ties broken by CSPRNG among the tied targets (host-only, deterministic from a per-night nonce). In mod-enters mode the moderator sets the resolved target directly.",
+      "rationale": "Deterministic, timing-free resolution avoids the 'last submitter controls the kill' leak and keeps behavior identical across clients.",
+      "rejected": "Last-submission-wins (timing-leaky) or role-order tie-break (role-correlated)."
+    },
+    {
+      "topic": "Trust model honesty",
+      "choice": "Document plainly: the host can see all roles and can attempt to cheat (commit-reveal only limits retroactive edits, not peeking or liveness manipulation); players can collude off-channel (phone, whisper, showing screens); anyone can shoulder-surf a neighbor's screen; and a compromised device/browser is out of scope. Do not pretend to solve these.",
+      "rationale": "A host-authoritative P2P design has a trust root. Claiming otherwise would be dishonest and lead to bad UX expectations."
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "redact",
+      "signature": "/** Pure, host-only. @param {GameState} state @param {ViewerContext} viewer @returns {ClientView} */\nfunction redact(state, viewer) {}",
+      "purpose": "Build the single per-viewer allowlist projection. Never callable on guests; the source of truth for the visibility policy."
+    },
+    {
+      "name": "ViewerContext",
+      "signature": "{ seatId:string, publicId:string, name:string, role:'villager'|'mafia'|'doctor'|'detective', alive:boolean, isModerator:boolean, isSpectator:boolean, connected:boolean, isHost:boolean }",
+      "purpose": "Host-resolved identity used by redact(); derived from the peer-connection→seat map, never from client payloads."
+    },
+    {
+      "name": "ClientView",
+      "signature": "{ v:1, roomCode, epoch:number, seq:number, serverNow:number, phase:'lobby'|'dealing'|'night'|'dawn'|'discussion'|'vote'|'runoff'|'lastWords'|'gameOver', phaseEndsAt:number|null, round:number, self:{ seatId,publicId,name,role,alive,connected,isModerator,isSpectator, privateNotes:{ mafiaTeam?:[{publicId,name,alive}], detectiveResults?:[{round,targetPublicId,verdict:'MAFIA'|'NOT_MAFIA'}], doctorLastProtectedId?:string, canAct:boolean, actionDeadline:number } }, board:{ players:[{publicId,name,alive,connected,isModerator}], votes?:{[voterPublicId]:targetPublicId}, voteCounts?:{[targetPublicId]:number}, nightOutcome:null|{killedPublicId:string|null,saved:boolean}, eliminated:null|{publicId,role?:Role}, chat:[{seq,fromPublicId,name,text,channel:'public'|'mafia'|'dead',ts}], announcement:string|null, reveal?:{[publicId]:Role}, dealProof?:{nonce,rolesByPublicId,commitment}, phaseLabelKey:string }, config:{ playerCount,mafiaCount,mode:'automated'|'moderated',actionStyle?:'playersAct'|'modEntersEverything',noKillFirstNight,tieRule,revealOnElimination,deadCanChat,nightDurationMs,voteDurationMs,chatEnabled,liveTally }, moderator?:ModeratorView }",
+      "purpose": "The complete, JSON-serializable shape a guest may receive. Absent fields (mafiaTeam, detectiveResults, moderator, reveal, dealProof) are simply not present — allowlist, not nulled."
+    },
+    {
+      "name": "ModeratorView",
+      "signature": "{ roles:{[publicId]:Role}, alive:{[publicId]:boolean}, seats:[{publicId,name,role,alive,connected,submittedAction:boolean}], nightActions:{ mafiaTargets:[publicId], mafiaResolved:publicId|null, doctorProtect:publicId|null, detectiveTarget:publicId|null, detectiveVerdict:'MAFIA'|'NOT_MAFIA'|null }, tally:{[targetPublicId]:number}, pending:{[publicId]:'waiting'|'submitted'}, controls:['advancePhase','setActionStyle','overrideKill','overrideSave','overrideTally','eliminate','declareWinner'] }",
+      "purpose": "Full secret view for the moderator only; present in ClientView.moderator solely when viewer.isModerator is true."
+    },
+    {
+      "name": "broadcastViews",
+      "signature": "function broadcastViews(peers: Map<string,PeerConn>, state: GameState): void",
+      "purpose": "Recompute each connected peer's redacted view via redact() and push it in one event-loop turn. Guests never receive GameState."
+    },
+    {
+      "name": "ingest",
+      "signature": "function ingest(state: GameState, peerId: string, msg: ClientMessage): { ok:boolean, reason?:string }",
+      "purpose": "Validate and apply one inbound action/chat message: resolve seat from peerId, check shape and role/phase legality, rate-limit, then mutate state. Never reads identity from msg."
+    },
+    {
+      "name": "newSeatToken / newPublicId",
+      "signature": "function newSeatToken(): string  // 256-bit crypto, base64url\nfunction newPublicId(): string   // 64-bit crypto, hex\nfunction newNonce(): Uint8Array",
+      "purpose": "Unguessable reconnect credentials and opaque player ids; also the per-night nonce for deterministic resolution and the deal commitment."
+    },
+    {
+      "name": "secureRandomInt / shuffle / buildRoleBag",
+      "signature": "function secureRandomInt(maxExclusive:number): number  // crypto.getRandomValues + rejection sampling\nfunction shuffle<T>(arr:T[]): T[]\nfunction buildRoleBag(playerCount:number): Role[]",
+      "purpose": "Bias-free CSPRNG primitives for role assignment and publicId permutation; buildRoleBag computes mafiaCount and fills the four classic roles."
+    },
+    {
+      "name": "dealCommitment / verifyDeal",
+      "signature": "async function dealCommitment(rolesByPublicId, nonce): Promise<string>  // SHA-256 hex\nasync function verifyDeal(proof): Promise<boolean>",
+      "purpose": "Commit-reveal so the host cannot retroactively change roles once the commitment is public; verified by every client at game over."
+    },
+    {
+      "name": "reconnect",
+      "signature": "function reconnect(roomCode:string, seatToken:string): Seat | null",
+      "purpose": "Host-side lookup rebinding a new DataConnection to an existing seat by token match; returns null (treated as spectator) on mismatch."
+    },
+    {
+      "name": "resolveMafiaKill",
+      "signature": "function resolveMafiaKill(submissions: Map<seatId,publicId>, nonce: Uint8Array, rng=secureRandomInt): publicId | null",
+      "purpose": "Timing-free plurality with CSPRNG tie-break; used only when actionStyle==='playersAct'."
+    },
+    {
+      "name": "setText / sanitizeName / sanitizeChat",
+      "signature": "function setText(el: Element, s: string): void\nfunction sanitizeName(raw: string): string   // NFC, cap 24, strip controls + bidi overrides\nfunction sanitizeChat(raw: string): string   // cap 400, strip C0/C1",
+      "purpose": "The only rendering path for user strings (textContent) and the input hardening that makes HTML/script/RTL-spoof injection inert."
+    }
+  ],
+  "edgeCases": [
+    {
+      "scenario": "All mafia submit conflicting kill targets.",
+      "handling": "Plurality wins; ties broken by CSPRNG among tied targets using the per-night host-only nonce. Deterministic and deadline-applied, so no submitter is exposed."
+    },
+    {
+      "scenario": "Doctor tries to protect themselves or the same person two nights running.",
+      "handling": "Self-protect allowed. Host tracks doctorLastProtectedId and rejects the repeat as an illegal action; the doctor's own view shows last protected so the UI can disable it. Doctor never learns whether the protected target was actually attacked."
+    },
+    {
+      "scenario": "Detective investigates self, a dead player, or a non-existent id.",
+      "handling": "Host rejects as illegal for the phase/role; no result recorded, no error detail leak beyond 'invalid action'."
+    },
+    {
+      "scenario": "Player reloads mid-night and reconnects.",
+      "handling": "seatToken rebinds the seat; refreshed ClientView restores their unsubmitted action state and phaseEndsAt. Other players' submission status is never included."
+    },
+    {
+      "scenario": "Cheater attempts to reconnect as a different player.",
+      "handling": "They must present that seat's 256-bit token, which they do not have; mismatch → treated as a new spectator with public-only projection. Host rate-limits join attempts."
+    },
+    {
+      "scenario": "A player joins after dealing has started.",
+      "handling": "Only lobby joins get seats/roles. Post-deal joins become spectators (public board only); mid-game spectator promotion is not allowed."
+    },
+    {
+      "scenario": "An eliminated player reconnects.",
+      "handling": "Seat is restored with alive=false; they receive own former role + public board + dead/spectator channel per deadCanChat. No living roles, no mafia channel unless they were mafia (their own team info is their own)."
+    },
+    {
+      "scenario": "Host disconnects or the host browser closes.",
+      "handling": "Game freezes; clients show 'host disconnected'. Host migration is documented as future work and explicitly flagged as a secrecy risk (the new host would need the full GameState, exposing all roles)."
+    },
+    {
+      "scenario": "Moderator (remote device) disconnects.",
+      "handling": "Game pauses because no one can advance phases in moderated mode; moderator reconnects via moderatorToken. In default host==moderator setup this cannot occur separately."
+    },
+    {
+      "scenario": "Duplicate, delayed, or out-of-order messages after flaky Wi-Fi.",
+      "handling": "epoch+seq on every broadcast; clients drop seq<=lastSeq, and a changed epoch forces a full resync. Host ignores stale client actions by round+phase."
+    },
+    {
+      "scenario": "Vote ends in a tie.",
+      "handling": "tieRule='noElimination' → nobody eliminated; tieRule='runoff' → fixed-window runoff among tied players, a second tie resolves to no elimination. Tally is final-only by default."
+    },
+    {
+      "scenario": "noKillFirstNight is enabled.",
+      "handling": "Night 1 still runs (actions collected for doctor/detective knowledge) but the mafia kill is not resolved; dawn reports no death."
+    },
+    {
+      "scenario": "Win condition becomes true at night resolution (e.g., mafia count >= town).",
+      "handling": "Checked at phase boundaries only (after night resolution, after vote close), never mid-phase, so early termination cannot signal who acted. Losers are not told prematurely."
+    },
+    {
+      "scenario": "Two players pick colliding or homoglyph/RTL-spoofing names.",
+      "handling": "Duplicates are allowed but disambiguated visually by publicId badge; sanitizeName NFC-normalizes and strips bidi-override characters so no name can reorder surrounding text to impersonate another player."
+    },
+    {
+      "scenario": "Chat message contains <script>, <img onerror>, or RTL override.",
+      "handling": "sanitizeChat strips controls; render via textContent only, so markup is inert. CSP with no inline scripts is the second line of defense."
+    },
+    {
+      "scenario": "A guest's device clock is badly skewed.",
+      "handling": "Countdown uses host serverNow/phaseEndsAt after offset estimation; the device clock never gates game events."
+    },
+    {
+      "scenario": "Spectator or dead player opens devtools.",
+      "handling": "Their projection contains no role map, no night actions, no detective results — there is nothing secret in memory for them to read."
+    },
+    {
+      "scenario": "Host restarts its browser and clients reconnect.",
+      "handling": "New epoch is published; clients discard old state and resync from a fresh redacted view. Seat tokens stored in sessionStorage may be lost on host restart, so a new deal is created — no stale secrets survive."
+    },
+    {
+      "scenario": "Moderator is a separate device from the host.",
+      "handling": "Host sends ModeratorView over DTLS only to the peer authenticated by moderatorToken. Documented as a trusted-device surface; the room's secrecy then depends on that device not being hostile."
+    }
+  ],
+  "risks": [
+    "Host-as-trust-root: the host can always read every role and can peek or manipulate liveness; commit-reveal only prevents retroactive role edits, it does not make the host honest.",
+    "Off-channel collusion (phone calls, whispering, showing screens) cannot be detected or prevented by the app.",
+    "Shoulder-surfing: a player can simply look at the screen of the person beside them; the game's physical format makes this the dominant real-world leak.",
+    "Host disconnect kills the game; any future host migration inherently exposes all roles to the new host's device.",
+    "If the moderator runs on a separate device, the full role map traverses the network to a device trusted by assumption, enlarging the attack surface.",
+    "Flaky Wi-Fi may cause seat-token loss (sessionStorage) leading to a legitimate player being relegated to spectator and unable to act.",
+    "Timing side channels are reduced (fixed windows, single-tick fanout) but not provably zero; a player still knows their own submission time and could infer from behavior of others over many rounds.",
+    "PeerJS cloud broker sees room-code/peer-id metadata (though not game content, which is DTLS-encrypted); it is a third-party dependency and a potential outage/NAT-reachability risk.",
+    "A compromised client device or malicious browser extension can read that player's own secrets and forge actions; out of scope to defend.",
+    "Dead-player chat (if deadCanChat) can leak information if dead players include a mafia member who reveals the living mafia team to the dead channel."
+  ]
+}

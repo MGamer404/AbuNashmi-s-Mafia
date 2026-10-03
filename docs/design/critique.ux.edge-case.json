@@ -1,0 +1,85 @@
+{
+  "problems": [
+    {
+      "issue": "The spec handles 'Host disconnects' but never 'Moderator disconnects'. In HOST-MODERATED mode the moderator is a distinct device/module with no card; in the 'mod enters everything' sub-style, players are explicitly reduced to 'Wait for the moderator' with all pickers hidden. If that device drops mid-phase, players have no picker and no phase control, and the spec's only recovery path (host localStorage snapshot + peer-id==room-code rejoin) covers the player-server, not the moderator. The table is soft-locked with no exit until the same moderator device returns.",
+      "severity": "fatal",
+      "fix": "Define moderator ownership explicitly (is the moderator the host device, or a separate peer?) and add a recovery path: on moderator loss, automated fallback to player-action mode, or a takeover/re-elect flow, or a visible 'moderator disconnected — waiting or switch to players-act' escape hatch with a timeout that downgrades the phase."
+    },
+    {
+      "issue": "Host-disconnect recovery is unsound on two counts. (1) 'the peer id equals the room code, the host rejoins the same room and resumes from a localStorage snapshot' — localStorage is per-device, so only the *same* host device can resume; if the host's phone is lost/cleared, the authoritative state is gone and all 5–20 clients sit on the reconnect overlay forever. (2) Naming the host seat by the room code means anyone who knows the 6-char code can claim that peer id on the public broker while the host is away and impersonate the authoritative server, receiving/granting secrets. The spec's risk list flags broker SPOF but not host-state loss or seat hijacking.",
+      "severity": "fatal",
+      "fix": "Tie the host identity to a cryptographic token, not a guessable room code; broadcast periodic host-signed state checkpoints to players (or elect a host-migration node) so the room can resume/re-elect when the original host device is gone; show a bounded 'host lost' terminal state with 'end game' rather than an indefinite overlay."
+    },
+    {
+      "issue": "The phase FSM (lobby -> night{mafia,doctor,detective} -> day -> vote -> end) has no explicit win-check transition. Nothing states *when* the 'Mafia count >= town count' / 'all Mafia eliminated' test runs. Concretely, after a night kill reduces the town to parity, the design still flows mafia->doctor->detective->'Day begins'->'Call the vote', so surviving night actors act, a discussion and a vote are held, and a town that can no longer win is asked to vote anyway — and the detective can receive a result after the game is already decided.",
+      "severity": "major",
+      "fix": "Add an explicit win-check step the engine runs after every elimination (and after every night resolution) before advancing the step machine; if a win condition holds, transition straight to phase 'end'. Add 'no town can act' as a checked condition (e.g., all non-mafia dead or parity reached)."
+    },
+    {
+      "issue": "Role-count distribution across 5–20 players is nowhere defined. 'Exactly 4 roles' says nothing about *how many* of each. At 5 players there is no stated Mafia/Doctor/Detective count, and at 20 a single Doctor/Detective is dramatically weaker than the classic ratio (~1 Mafia per 4–5). Because the win condition is 'mafia >= town', an ad-hoc or fixed count can make some player counts unwinnable or trivial (e.g., 3 Mafia among 5 instantly satisfies parity).",
+      "severity": "major",
+      "fix": "Specify a deterministic role-count function (mafiaCount = floor(n/4) clamped, one Doctor, one Detective conditional on n, rest Villager) and validate it against the win-condition thresholds for every n in 5..20; expose it in the config sheet and to the moderator roster."
+    },
+    {
+      "issue": "Race between manual phase advance and the automated timer/in-flight picks. In 'players act' moderated mode the moderator has phase-advance controls, yet renderTimerRing/renderActionPanel still carry deadlines and 'on timeout auto-submits if selected else abstains'. If the moderator presses 'Day begins' while a night pick is still in flight, or a timer expires in the same tick the moderator advances, there is no staleness guard: the only drop rule is 'Eliminated player's in-flight vote or night pick… Host drops it', which keys on the player being dead, not on the pick belonging to a phase that has already ended. A mafia's night-1 victim choice can therefore be applied during the day, or a vote counted after the tally was called.",
+      "severity": "major",
+      "fix": "Stamp every pick/action with the phase+step+turn id; host drops any action whose stamp does not match the current turn. Disable/ignore the timer's auto-submit while a moderator advance is pending, and make 'Call the vote'/phase advance idempotent and turn-scoped."
+    },
+    {
+      "issue": "'Moderator toggles players-act <-> mod-enters mid-phase: any already-submitted private picks are kept and shown to the moderator, not discarded.' The spec does not say what the moderator is then supposed to *do* with those picks — apply them, or re-type them into the manual grid. In mod-enters mode outcomes are entered manually, so a kept mafia/doctor/detective pick that also gets manually entered can be double-applied (e.g., a save recorded twice, or a kill resolved from both the kept pick and the manual entry), and a moderator who assumes picks were auto-applied will silently drop them.",
+      "severity": "major",
+      "fix": "Define the switch semantics: on entering mod-enters, show kept picks as pre-filled, unconfirmed suggestions in the manual grid (never auto-applied); on switching back to players-act, re-open pickers for actors who had not submitted. Make each outcome idempotent so applying the same pick twice is a no-op."
+    },
+    {
+      "issue": "Tests too weak: `test_ten_day_recent_leader_includes_day_with_bars` only checks that a sane 10-day window with a recent +20% day passes the ≥50% MH guard. Production has run 11 days, the 11th day (Sat Jul 25) has no bar yet, and the same guard is used to veto. `recent_leader()` anchors at `dates[-1]` with no upper bound; if any of the most-recent 10 days is anomalous (e.g. a botched commit, a broken build), the guard either vetoes a harmless global run or (worse) is gamed by a single anomalous day. Also, a 10-day recent window never exercises `pf_vs_mh_days_forward=8`, so the PnL/MH forward window is untested.",
+      "severity": "major",
+      "fix": "Add tests for: 11+ day windows where the stale/aggressive logic currently points to an older date; the exact top vs bottom leader selection when the top daily bar is on a partial/rollover day; and any forward-looking window other than 8 beside==f_after. Pin these via explicit expected values, not `validate_bar()` alone."
+    },
+    {
+      "issue": "Disconnects mid-phase below the minimum are unhandled. The Deal button is disabled when <5 players, but nothing describes what happens if players leave during Deal or during Night/Vote and the count drops below 5, or to 1. The 21-player cap (5–20) is likewise unenforced in the spec's FSM; the host's peer-id==room-code room has exactly one host who may or may not be a player — the spec never says how the 5–20 count treats a non-card-bearing moderator.",
+      "severity": "major",
+      "fix": "Define floor/ceiling enforcement: reject join beyond 20, pause/force-end when living count would drop below the mode's minimum, and state whether the moderator occupies a player slot (it should not, for counting) and whether 5 counts players or players+moderator."
+    },
+    {
+      "issue": "A night actor killed by the Mafia that same night is not handled. The order mafia->doctor->detective means the Detective can be nominated and killed by the Mafia, yet the flow then advances to the detective step and the private-action panel: does a dead Detective still investigate and receive a result? Classic rules resolve actions simultaneously and a victim who dies that night does not get to act or learn anything. The spec has no 'skip dead actor' step, and it does not define whether the Doctor's protection is computed before or after the kill (self-protect while being the target), nor whether the Doctor being killed still saves their target that night.",
+      "severity": "major",
+      "fix": "Resolve the night atomically: collect all night actions against the pre-night living set, then compute the kill with Doctor immunity, then mark deaths, then reveal Detective results only to actors alive at resolution (or explicitly choose and document a house rule). Add a 'dead actor — skipped' branch so a killed night role never sees a live picker."
+    },
+    {
+      "issue": "Vote-tie runoff has no terminal state. tieRule='runoff' produces 'a second vote round', but nothing bounds it: if the runoff (or a runoff of the runoff) ties again, the spec loops with no exit rule. The tally component can render 'no majority' but there is no rule for a tied runoff, so the game can cycle forever.",
+      "severity": "major",
+      "fix": "Define a terminal runoff rule: exactly one runoff; a second tie resolves to no elimination (or a random/speaker-decided elimination per config). Bound the vote round counter in the turn id."
+    },
+    {
+      "issue": "Under noKillFirstNight, the action panel still dispatches on (phase.step, myRole) with no special case, so the Mafia are shown the same 'choose tonight's victim' picker on night 1 even though the config suppresses the kill. Players are told to choose a victim who can never die — a direct contradiction between the advertised rule and the rendered action, and the private result/outcome messaging then reports no death against an instruction that implied one.",
+      "severity": "minor",
+      "fix": "When noKillFirstNight, render a distinct 'no kill tonight' waiting card for Mafia on night 1 and suppress the target picker and the kill-resolution branch; surface the rule in the phase banner."
+    },
+    {
+      "issue": "The manual-entry grid validates only name+role via the confirm step, not the tally arithmetic. In 'mod enters everything' the moderator types the vote tally by hand; a mis-tap can publish public_board.tally with more votes than living players or votes attributed to a dead/non-existent player, and the UI will render an impossible result as authoritative. The single-level undo does not prevent a wrong-but-consistent-looking tally from standing.",
+      "severity": "minor",
+      "fix": "Validate manual tally entry against the living roster (sum of votes <= living count, no votes on dead players, leader determined by the entered numbers) before broadcast, and block/flag inconsistent totals with an explicit error."
+    },
+    {
+      "issue": "Timer auto-submit fires on a merely *selected* pick. renderTimerRing's expiry 'auto-submits if selected else abstains', but a selection can be tentative (a tile the player was considering while the countdown ran). Auto-submitting a tentative vote can eliminate a target the player never intended to commit, silently and with only a toast.",
+      "severity": "minor",
+      "fix": "Require an explicit confirm (or a distinct 'locked' state) before a pick is auto-submittable; on expiry, abstain for unconfirmed selections and show a 'your pick was not confirmed' notice. For votes, prefer abstain over auto-lock."
+    },
+    {
+      "issue": "Join-limit and reconnect public board are unspecified. Rooms are capped at 20 in the summary but nothing in the lobby/join FSM enforces or surfaces the cap, and the reconnect path only promises replay of 'the last private payload' — the public_board (roster, alive/dead, tally) is not described as replayed, so a client that reconnects mid-day can render an empty or stale table while the host believes it is synced.",
+      "severity": "minor",
+      "fix": "Add a 'room full' join rejection state and a versioned public_board snapshot replay on (re)join so every peer re-renders the current authoritative board alongside its private payload."
+    }
+  ],
+  "strengths": [
+    "The hostile-client boundary is drawn correctly at the UI layer: the Game screen renders only host-pushed private payloads, the card flip is local UI state never sent on the wire, and the spec explicitly rejects 'send full state, hide in DOM'. This is the right instinct for a devtools-cheating player and is stated as an interface contract, not an afterthought.",
+    "Reconnect replays the last private_role and deliberately re-arms the card face-down with no fly-in re-animation — information-preserving and avoids a re-flip that could double-reveal.",
+    "prefers-reduced-motion is handled end to end: no fly-in, instant flip, plus aria-live text and a role sheet so the role never depends on motion or imagery.",
+    "The dead-chat default OFF with host enforcement of channel membership is the correct classic-Mafia call; live dead chat is opt-in, dead-to-dead only, and never reaches living players.",
+    "Configurable tie rules, first-night no-kill, and actionMode make the classic house-rule variation explicit rather than hard-coded, and both moderated sub-styles share one player renderer (no divergent screens).",
+    "Bilingual/RTL handling is genuinely thought through: logical properties with a small targeted rtl.css, bdi/unicode-bidi:isolate and dir='auto' for user text, Intl.PluralRules for both locales, and fixed-width tabular numerals so the timer ring does not jitter on the 1s tick.",
+    "The moderator gets an omniscient separate panel rather than an augmented player screen, which keeps all-role data off player devices that could be hostile — the correct isolation choice.",
+    "Concrete edge-case coverage is unusually good: past deadline clamped via measured clock offset, doctor repeat-target disabled with a reason, empty detective target list with explicit skip, stale picks from eliminated players dropped."
+  ],
+  "verdict": "sound-with-fixes"
+}

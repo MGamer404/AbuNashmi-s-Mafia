@@ -1,0 +1,13 @@
+{
+  "name": "abunashmi-mafia",
+  "version": "1.0.0",
+  "description": "A peer-to-peer browser Mafia card game with shareable room codes, automated and host-moderated modes, and full English/Arabic support.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.mjs\"",
+    "serve": "node --run test && node tools/serve.js"
+  },
+  "license": "MIT",
+  "devDependencies": {}
+}

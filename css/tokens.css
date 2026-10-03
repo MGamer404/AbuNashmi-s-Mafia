@@ -1,0 +1,288 @@
+/* ==========================================================================
+   AbuNashmi's Mafia — design tokens
+   --------------------------------------------------------------------------
+   Everything visual is expressed as a custom property here so the day/night
+   theme swap is a single attribute flip on <html> and the RTL flip is handled
+   entirely by CSS logical properties (no separate RTL stylesheet).
+
+   Rules for this file:
+     - Physical properties (margin-left, padding-right, left, text-align:left)
+       are BANNED. Use inline-start / inline-end equivalents so Arabic works.
+     - No web fonts. A party game on phones must paint instantly and must not
+       depend on a font CDN being reachable.
+   ========================================================================== */
+
+:root {
+  /* ---- Type scale (1.25 major third, rounded) ---------------------------- */
+  --fs-xs: 0.694rem;
+  --fs-sm: 0.833rem;
+  --fs-base: 1rem;
+  --fs-md: 1.25rem;
+  --fs-lg: 1.563rem;
+  --fs-xl: 1.953rem;
+  --fs-2xl: 2.441rem;
+  --fs-3xl: 3.052rem;
+
+  --fw-normal: 400;
+  --fw-medium: 500;
+  --fw-bold: 700;
+  --fw-black: 900;
+
+  --lh-tight: 1.15;
+  --lh-normal: 1.5;
+  --lh-loose: 1.7;
+
+  /* Latin + Arabic stacks. The Arabic faces are listed first in the Arabic
+     locale block below; here both are present so mixed-script names render
+     with the right face per-character. */
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, 'Noto Sans', 'Segoe UI Historic', sans-serif;
+  --font-arabic: 'Segoe UI', 'Noto Sans Arabic', 'Arabic Typesetting', Tahoma,
+    system-ui, sans-serif;
+  --font-display: 'Segoe UI Semibold', 'Segoe UI', system-ui, -apple-system,
+    Roboto, 'Noto Sans Arabic', sans-serif;
+  /* Tabbular numerals so countdown timers do not jitter as digits change. */
+  --font-mono: ui-monospace, 'Cascadia Mono', 'Segoe UI Mono', 'SF Mono',
+    Menlo, Consolas, monospace;
+
+  /* ---- Spacing (4px base grid) ------------------------------------------ */
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+  --sp-7: 3rem;
+  --sp-8: 4rem;
+
+  /* ---- Radii ------------------------------------------------------------- */
+  --r-sm: 6px;
+  --r-md: 12px;
+  --r-lg: 20px;
+  --r-xl: 28px;
+  --r-full: 9999px;
+
+  /* ---- Motion ------------------------------------------------------------ */
+  --dur-fast: 120ms;
+  --dur-base: 240ms;
+  --dur-slow: 480ms;
+  --dur-deal: 620ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* ---- Layout ------------------------------------------------------------ */
+  --tap-min: 44px; /* minimum touch target — Apple HIG / WCAG 2.5.5 */
+  --shell-max: 640px;
+  --z-table: 1;
+  --z-sticky: 20;
+  --z-sheet: 40;
+  --z-modal: 60;
+  --z-toast: 80;
+  --z-deal: 100;
+
+  /* ---- Semantic colours, NIGHT theme (the default) -----------------------
+     Near-black blue base. The app lives here by default because that is where
+     the game starts (lobby -> night). */
+  --c-bg: #0a0d14;
+  --c-bg-elev: #111624;
+  --c-surface: #161d2e;
+  --c-surface-2: #1e2739;
+  --c-surface-3: #28334a;
+  --c-border: #2c3852;
+  --c-border-strong: #3d4c6b;
+
+  --c-text: #e9edf7;
+  --c-text-muted: #97a3bd;
+  --c-text-faint: #63708c;
+  --c-text-on-accent: #ffffff;
+
+  /* Accents */
+  --c-accent: #5b8cff;           /* moonlight blue — the app's primary */
+  --c-accent-hover: #7ba3ff;
+  --c-accent-dim: rgba(91, 140, 255, 0.16);
+
+  --c-mafia: #e04a4a;            /* blood red — mafia team */
+  --c-mafia-dim: rgba(224, 74, 74, 0.16);
+  --c-town: #46b17b;             /* town green — village team */
+  --c-town-dim: rgba(70, 177, 123, 0.16);
+  --c-doctor: #4fb8c9;           /* teal — doctor */
+  --c-doctor-dim: rgba(79, 184, 201, 0.16);
+  --c-detective: #b98ce0;        /* violet — detective */
+  --c-detective-dim: rgba(185, 140, 224, 0.16);
+  --c-gold: #e0a940;             /* gold — votes, timers, day */
+  --c-gold-dim: rgba(224, 169, 64, 0.16);
+
+  --c-danger: #e0574a;
+  --c-warn: #e0a940;
+  --c-success: #46b17b;
+  --c-info: #5b8cff;
+
+  /* ---- Effects ----------------------------------------------------------- */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 34px rgba(0, 0, 0, 0.55);
+  --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.6), 0 2px 0 rgba(255, 255, 255, 0.05) inset;
+  --glow-accent: 0 0 0 1px rgba(91, 140, 255, 0.5), 0 0 22px rgba(91, 140, 255, 0.3);
+  --glow-mafia: 0 0 0 1px rgba(224, 74, 74, 0.55), 0 0 22px rgba(224, 74, 74, 0.32);
+  --glow-gold: 0 0 0 1px rgba(224, 169, 64, 0.5), 0 0 22px rgba(224, 169, 64, 0.3);
+
+  --ring-focus: 0 0 0 3px var(--c-bg), 0 0 0 5px var(--c-accent);
+
+  /* ---- Card back pattern -------------------------------------------------
+     A woven diagonal weave drawn purely in CSS gradients — no image asset,
+     so it stays crisp at any DPI and costs no request. */
+  --card-back: repeating-linear-gradient(
+      45deg,
+      rgba(255, 255, 255, 0.045) 0 6px,
+      transparent 6px 12px
+    ),
+    repeating-linear-gradient(
+      -45deg,
+      rgba(255, 255, 255, 0.045) 0 6px,
+      transparent 6px 12px
+    ),
+    linear-gradient(160deg, #232d45 0%, #131a2b 60%, #0d121e 100%);
+}
+
+/* ==========================================================================
+   DAY theme — applied while the game is in a day phase.
+   Lifts the surface tones a little and warms the ambient light so the table
+   visibly "wakes up". Deliberately still dark overall: this is a game played
+   in a dim room, and a full white flash would be hostile at night.
+   ========================================================================== */
+[data-phase='day'] {
+  --c-bg: #12141a;
+  --c-bg-elev: #1a1d26;
+  --c-surface: #21252f;
+  --c-surface-2: #2a2f3b;
+  --c-surface-3: #353b4a;
+  --c-border: #3a4051;
+  --c-border-strong: #4c5468;
+
+  --c-text: #f2f3f7;
+  --c-text-muted: #a8b0c2;
+  --c-text-faint: #767f94;
+
+  --c-accent: #e0a940;
+  --c-accent-hover: #efbc5e;
+  --c-accent-dim: rgba(224, 169, 64, 0.16);
+  --glow-accent: var(--glow-gold);
+
+  --card-back: repeating-linear-gradient(
+      45deg,
+      rgba(255, 255, 255, 0.05) 0 6px,
+      transparent 6px 12px
+    ),
+    repeating-linear-gradient(
+      -45deg,
+      rgba(255, 255, 255, 0.05) 0 6px,
+      transparent 6px 12px
+    ),
+    linear-gradient(160deg, #3a4257 0%, #222839 60%, #171b26 100%);
+}
+
+/* ==========================================================================
+   Arabic locale
+   ========================================================================== */
+[lang='ar'] {
+  --font-sans: var(--font-arabic);
+  --font-display: var(--font-arabic);
+  /* Arabic sits on a taller line; give it room so diacritics are not clipped
+     and never let it be letter-spaced (spacing breaks Arabic joining). */
+  --lh-tight: 1.35;
+  --lh-normal: 1.75;
+}
+
+/* ==========================================================================
+   Base reset
+   ========================================================================== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* Prevents iOS Safari from inflating text in landscape. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  line-height: var(--lh-normal);
+  /* The game is an app, not a document: kill rubber-band overscroll and the
+     double-tap-to-zoom delay on every control. */
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display);
+  line-height: var(--lh-tight);
+  margin: 0;
+  font-weight: var(--fw-bold);
+}
+
+p {
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  /* Stop long-press on a vote button from popping the iOS selection menu. */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
+  border-radius: var(--r-sm);
+}
+
+/* Respect the OS "reduce motion" setting everywhere. Components additionally
+   opt out of the deal animation; this is the global safety net. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Visually hidden but available to screen readers. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

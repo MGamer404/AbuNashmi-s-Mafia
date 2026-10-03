@@ -1,0 +1,85 @@
+{
+  "problems": [
+    {
+      "issue": "Client-supplied `at` timestamps are trusted for deadline math. Every Action carries `at`, and advance logic compares `at >= deadline`. In a P2P design the client is explicitly hostile: a client can send `at = Date.now()+1e12`, or a clock-skewed phone can send a wrong `at`, and the reducer will treat the phase as overdue and advance it early. This directly defeats the CRITICAL anti-cheat/tamper requirement and cannot be fixed by projectState.",
+      "severity": "fatal",
+      "fix": "Make `at` host-authoritative: the host runtime stamps `at` on ingress (from the injected clock) and overwrites any client value before dispatch; the reducer still stays pure because the stamp is applied at the boundary, matching the existing 'services are passed to createInitialState/adapters' rule. Document that the action's `at` is never client-controlled."
+    },
+    {
+      "issue": "Two overlapping replication channels are specified and the transport payload is undefined: `Effect` emits `PUBLIC`/`PRIVATE{to:PlayerId}`, while `projectState(state, viewerId)` also produces per-client views, and the summary says 'the host sends projectState'. A solo implementer cannot tell what actually goes over the wire — projected snapshots or effect streams — and the two will drift. Worse, `PRIVATE.to:PlayerId` cannot address the moderator, who is not a PlayerId, so mod-only secret effects have no delivery path (projectState handles 'MODERATOR' but Effect does not).",
+      "severity": "major",
+      "fix": "Pick one channel. Recommended: host broadcasts `projectState(state, viewerId)` per client as the sole state-replication path; restrict Effect to runtime-local instructions (`SET_TIMER`, `CLEAR_TIMER`, `GAME_OVER`, `LOG`) and delete `PUBLIC`/`PRIVATE` effects, OR keep effects as the only channel and add a `to:'MODERATOR'` variant. Do not specify both."
+    },
+    {
+      "issue": "`projectState`'s anti-cheat claim is overstated for the host. In AUTOMATED mode there is no referee, so one of the players is the host, and that player's browser holds the full unredacted GameState (all roles, all findings) in memory. A hostile hosting player reads everything from devtools regardless of projection. The spec asserts 'the engine literally cannot [leak]', but the CRITICAL 'a cheating player must NOT be able to read secret information' constraint is unachievable for the host-player without addressing it.",
+      "severity": "major",
+      "fix": "State the limitation explicitly and reduce the claim to 'non-host clients'. Give an option to make the hosting seat a non-player (spectator/automated) OR accept and document that the host player can cheat, and require good-faith hosting. Do not let the CRITICAL constraint stand as 'solved' when the hosting player is an exception."
+    },
+    {
+      "issue": "Advance timers stall in AUTOMATED mode when the host tab is backgrounded on iOS Safari. The design advances only when a TICK is dispatched, and TICK 'only checks at >= deadline' — but if all players are idle waiting, no further action arrives, so no TICK fires and the phase never auto-advances. iOS Safari aggressively suspends background-tab JS, and SharedWorker (a common escape hatch) is unsupported on iOS, so the stated mitigation ('overdue-tick check on every dispatch') does not cover the actual mobile use case.",
+      "severity": "major",
+      "fix": "Specify that the host runtime owns a persistent `setInterval` tick (capped, e.g. 250-1000ms) plus `visibilitychange`/`pageshow` handlers that immediately dispatch TICK on resume, and that elapsed wall-clock is recomputed from host time. Accept that a fully-suspended iOS host freezes the game and surface a visible 'host must keep the tab open' warning; do not claim throttle-survival the design does not have."
+    },
+    {
+      "issue": "The stalemate/draw default is unsafe. `firstNightNoKill=true` by default forces night 1 to NO_KILL, and stalemate increments on any round with 'no night death AND no day elimination'. Early days in classic play frequently end in no elimination, so three such rounds (default `maxStalemateRounds=3`) can fire DRAW in a normal, still-winnable game — the mafia can even farm it by abstaining.",
+      "severity": "major",
+      "fix": "Do not count rounds in which the mafia were legally prevented from killing (first-night-no-kill) toward the stalemate counter; count only rounds where a kill was legally possible and none occurred. Raise/derive the default and document the interaction with firstNightNoKill explicitly."
+    },
+    {
+      "issue": "Mafia-night resolution is under-specified for the multi-mafia case the game explicitly supports (up to 20 players). `night.kill` resolves via submissions + aggregate PLURALITY, but if two mafia split their votes 1-1, or disagree, there is no defined tiebreak; the `tiePolicy` config is scoped to the day vote, not the night kill. 'All mafia together' is stated but disagreement behaviour is not.",
+      "severity": "major",
+      "fix": "Define kill aggregation explicitly: e.g. PLURALITY with a seeded-random tiebreak, or require a single designated killer, or fall back to NO_KILL on an unresolved tie. Add a `killTiePolicy` (or reuse RANDOM via the seeded PRNG) and an edge case covering a 2-way mafia split."
+    },
+    {
+      "issue": "Role composition is unspecified and internally inconsistent. `assignRoles` claims 'mafia/town balance' validated for 5..20 players but gives no formula, so an implementer cannot know how many Mafia per size. The state shape is also contradictory: `night.investigate` is a single `{detectiveId,targetId,result}` (one Detective) while `doctorHistory: Record<PlayerId,PlayerId|null>` and `detectiveKnowledge: Record<PlayerId,Finding[]>` are keyed by player, implying possibly multiple holders of those roles. `detectiveKnowledge` also implies multiple Detectives while `investigate` is singular.",
+      "severity": "major",
+      "fix": "Publish an explicit role table by player count (exact Mafia count per size; confirm exactly one Doctor and one Detective, or make them arrays if multiples are intended). Make the state shape match the decision: single detective -> single `investigate` slot is fine, but then key `detectiveKnowledge` by the one detective id or justify the Record."
+    },
+    {
+      "issue": "GameState carries three overlapping decision stores with no stated relationship: `slot: PendingAction|null`, `vote: PendingAction|null`, and `night.{kill,protect,investigate}` (Resolutions). It is unclear whether the currently-open decision lives in `slot` and is then copied into `vote`/`night.*`, whether `vote` is both the open slot and the resolved record, and how `slot` relates to `vote`. This ambiguity will stall the implementer and invites state drift.",
+      "severity": "major",
+      "fix": "Define a single `currentSlot: PendingAction|null` plus immutable resolved records, and specify the exact copy step at resolution. Alternatively drop the top-level `slot` and keep `vote`/`night.kill` as the live slots. State the invariant in one sentence."
+    },
+    {
+      "issue": "PRNG threading is inconsistent with the pure-reducer contract. `reduce(state, action)` is supposed to be the single pure entry point and `state.rng` holds PRNG state, yet `resolvePending(slot, rng)` takes and returns rng out-of-band, and `assignRoles(..., rng)` likewise. It is undocumented whether the PRNG advances on every resolve (even when no random tiebreak is needed) or only on random paths; if it advances conditionally, replay determinism depends on branch history and is easy to get wrong.",
+      "severity": "minor",
+      "fix": "Thread RNG exclusively through `state.rng` and have `reduce` pass it down; document a single rule: advance exactly once per `resolvePending` call (or advance only on the RANDOM path) and state which, so replays are unambiguous. Keep `reduce` as the only public mutator."
+    },
+    {
+      "issue": "Over-engineered resolve policies and aggregates that are dead on arrival. `resolvePolicy` offers OVERRIDE_FIRST | OVERRIDE_ONLY | PLAYERS_ONLY, but OVERRIDE_FIRST already subsumes the other two: 'mod enters everything' simply has no submissions, and 'players act' simply has no override. Likewise `aggregate: ...|'LAST'` is never used by any decision described. These are configuration branches a solo implementer must test for no gameplay value.",
+      "severity": "minor",
+      "fix": "Collapse to a single documented rule: 'resolution = override if present, else aggregate(submissions)'. Delete OVERRIDE_ONLY/PLAYERS_ONLY and the LAST aggregate (or justify each with a named use case). This is a genuine simplification, not a rule loss."
+    },
+    {
+      "issue": "Winning mid-phase can leave a decision slot OPEN with late private effects. The spec's own risk list admits evaluateWin firing on a death 'must also flush the DECISION slots ... or a game can transition to ENDED while a slot is still OPEN', but no decision/edge case enforces it. This is a state-machine hole, not merely a risk.",
+      "severity": "minor",
+      "fix": "Make it a hard rule in NIGHT_RESOLVE/DAY_ELIMINATE: the slot is forced to RESOLVED/voided before evaluateWin runs, and add an edge case asserting no PRIVATE effect is emitted for a voided slot after GAME_OVER."
+    },
+    {
+      "issue": "`RETRACT` is in the closed Action union but appears nowhere in the decisions or edge cases, and conflicts with 'slots are write-once to RESOLVED'. It is undefined whether RETRACT removes a submission, whether it is allowed only pre-deadline, and how it interacts with `changeableUntilDeadline` (last-write-wins already covers vote changes).",
+      "severity": "minor",
+      "fix": "Either remove RETRACT (re-submit covers changeable votes) or specify its semantics and the guard conditions."
+    },
+    {
+      "issue": "Several referenced types are never defined. The Phase enum (LOBBY, ROLE_DEAL, NIGHT_MAFIA, ... ENDED), AdvancePolicy's mechanism enum, and GameConfig's full field list (declared as `config: GameConfig` but only partially enumerated across decisions) are used but not specified. An implementer must reconstruct them and may guess the transition table's bracket semantics wrong.",
+      "severity": "minor",
+      "fix": "Add explicit Phase and GameConfig type definitions with every field introduced by the config decisions (firstNightNoKill, tiePolicy, voteVisibility, maxStalemateRounds, revealSave, allowMafiaKillMafia, mafiaNoSubmit, etc.) in one place."
+    },
+    {
+      "issue": "Scope/feasibility risk for a single implementer: the spec asks for ~20 actions, ~15 phases, a seeded PRNG, a three-policy pending-slot resolver, an effect interpreter, per-viewer projection, reconnection/replay, live mode+sub-style switching, and i18n/RTL — with zero framework and no build step. Each piece is individually reasonable, but the aggregate is large for vanilla JS by one person, and the 'pure determinism/replay' machinery buys mostly test convenience, not gameplay.",
+      "severity": "minor",
+      "fix": "Keep the pure reducer and projectState (they carry the anti-cheat and test value), but cut the low-value knobs (see resolvePolicy/aggregate finding), defer replay/audit (`state.log`) until after the core loop works, and sequence the build: LOBBY -> deal -> automated night/day -> win, before moderated modes and live switching."
+    }
+  ],
+  "strengths": [
+    "The single `PendingAction` slot is a real simplification: making player taps and moderator entry structurally identical eliminates the dual applyPlayerKill/applyModKill code paths that would otherwise drift. This is the best idea in the spec.",
+    "`phaseId` carried on every decision action plus write-once RESOLVED slots is a correct, cheap defence against WebRTC reordering, duplicates, and reconnect replay — exactly what flaky Wi-Fi needs.",
+    "Advance-as-data (deadline in state, runtime owns setTimeout, reducer takes `TICK{at}`) correctly keeps the reducer pure and makes live AUTO<->WAIT switching a state edit rather than a rebuild; preserving remainingMs is the right call.",
+    "`projectState` as an explicit redaction boundary is the right shape for the hostile-client requirement, and delegating role/knowledge stripping to one function makes the boundary auditable.",
+    "Effects segregated from DOM/network keeps the engine headless-testable under `node --test`, matching the repo's actual test runner and no-build constraint.",
+    "Configuration flags for the debated house rules (ties, visibility, first-night-no-kill, self-vote, stalemate) are the right modelling: they centralize dialect choices instead of forking rule code.",
+    "The edge-case list is unusually complete — it anticipates protection-legality, dead-detective-same-night, parity-at-night, and moderator-typo cases that most specs miss.",
+    "Role/knowledge secrecy is genuinely confined to host state rather than CSS-hidden — the chosen architecture does deny role data to non-host clients, which is the correct foundation."
+  ],
+  "verdict": "sound-with-fixes"
+}

@@ -1,0 +1,75 @@
+{
+  "problems": [
+    {
+      "issue": "HOST-MODERATED mode (a locked requirement, both sub-styles) has NO protocol surface. There is no join path for a moderator, no moderator auth token, no moderator action kinds, and advancePhase()/setModerator() are host-local methods only. The `action` kinds are exclusively player actions (vote/nightKill/protect/investigate/lastWords); 'mod enters everything' (mod types kill/save/vote tally) has zero message support, and 'players act' phases cannot be advanced remotely. The spec also never says whether the moderator is the same browser as the host or a separate peer. As written an implementer cannot build mode 2, and if the moderator is remote, `setModerator(peerId, token)` grants a peer the unredacted snapshot with no specified authentication — a direct hole in the CRITICAL secrecy constraint.",
+      "severity": "fatal",
+      "fix": "Add explicit moderator protocol: joinModerator(code, modSecret) -> {modToken}, with modToken issued/held host-side and never guessable by guests; add moderator action kinds (kind:'mod', op:'kill'|'save'|'voteTally'|'advancePhase'|'setSubMode') routed through handleMessage and authorized against the mod slot; state plainly that in moderated mode the moderator IS the host-browser holder (or define a distinct remote-mod handshake)."
+    },
+    {
+      "issue": "Host reload from localStorage silently breaks snapshot freshness forever. snapshots are accepted only if `seq > lastAppliedSeq`, and seq is the host's own monotonic counter. On a host reload the in-memory seq resets (to 0/1), so every guest's lastAppliedSeq is higher and the client discards all post-recovery snapshots — the 'game resumes' claim fails exactly in the scenario the 120s window exists to save. Nothing in the envelope or welcome lets a guest distinguish a brand-new host generation from a stale one.",
+      "severity": "major",
+      "fix": "Add a host session generation/epoch (hostEpoch already appears in `welcome` but is never given semantics) to every envelope or snapshot; when a guest sees a higher hostEpoch/generation, it resets lastAppliedSeq and accepts the new host's seq sequence. Also persist the seq counter alongside state, or derive ordering from (generation, seq)."
+    },
+    {
+      "issue": "ClockSync cannot be implemented as specified. `pong` carries only {t0, tHost} (one host timestamp) but ClockSync.observe takes (t0, tHost, t3) and the rationale literally writes a garbled formula 'offset=((t0? host pairing))'. With a single host timestamp the guest cannot separate clock skew from round-trip delay (NTP needs host-receive AND host-send stamps). tHost's sampling instant (on receipt vs on reply) is not defined either.",
+      "severity": "major",
+      "fix": "Change pong to {t0, t1, t2} where t1 = host receipt time and t2 = host send time; compute offset = ((t1 - t0) + (t2 - t3)) / 2 with t3 = guest receive. State the sampling points explicitly."
+    },
+    {
+      "issue": "No TURN fallback, and symmetric-NAT / hotel / corporate Wi-Fi is a realistic venue for a tabletop party game. 'Host left / Room not found' will be indistinguishable from joining on a network where the DataChannel simply cannot form. The risk section acknowledges this but the design offers no mitigation and no detection to give the user an actionable message.",
+      "severity": "major",
+      "fix": "Detect ICE failure (iceConnectionState 'failed'/long connect timeout) and surface a distinct localized 'network blocks peer connections — try a hotspot' message. Allow an optional user-supplied TURN URL/credential in config so a power user can unblock a venue; document the limitation in the join screen."
+    },
+    {
+      "issue": "Host-as-player is undefined. In AUTOMATED mode there is no human referee, so the natural deployment is the host's phone also being a player — but HostSession has no player seat, no card, no action path, and the reconnection/redaction model treats the host as pure server. Conversely in MODERATED mode the host device is presumably the referee's. The spec never resolves this, which affects UI, redaction (does the host see its own role?), and who holds wakeLock.",
+      "severity": "major",
+      "fix": "Declare the modes explicitly: in AUTOMATED, host = a player seat that also runs the engine (host gets a normal redacted snapshot for itself, engine state is separate); in MODERATED, host = the referee and is not dealt a card. Add a `hostPlays: boolean` to config and a host seat id."
+    },
+    {
+      "issue": "The locked transport decision says 'A 6-character room code IS the peer id.' The spec contradicts this by defining derivePeerId(code)='anm-'+code. The prefix is technically the better design (global broker namespace), but it silently changes a LOCKED contract, so any other module or doc that equates peerId with the user-visible code will diverge.",
+      "severity": "major",
+      "fix": "Either obtain explicit sign-off to amend the locked decision (recommended — namespacing is correct), or carry both `code` and `peerId` through all modules and document that they differ. Do not ship with the two definitions coexisting ambiguously."
+    },
+    {
+      "issue": "Over-engineering for <10KB state that only the host mutates and only the host advances. Specifically: EWMA-smoothed ClockSync (offset is explicitly 'cosmetic' since guests cannot advance phases), redundant dedup (per-sender seq AND per-message id for snapshots), an unused clientNonce in `hello`, an unused/undefined hostEpoch in `welcome`, and a 4-state slot machine (connected/unresponsive/disconnected/expired) where a single lastSeen + grace timer would do.",
+      "severity": "minor",
+      "fix": "Simplify: replace EWMA with a single offset sample refreshed on each snapshot (or just render absolute deadlines and tolerate skew, since it is cosmetic); drop clientNonce and name hostEpoch; keep per-sender seq for snapshots and use message id only for actions (where dedup is actually needed); collapse slot states to lastSeen + (lobbyRemoved | gameInert)."
+    },
+    {
+      "issue": "Spectator identity collapses to the literal string 'spectator' in chat (`from: playerId|'spectator'`). With no per-spectator id, all spectators share one rate-limit bucket, cannot be individually kicked, and cannot be individually muted — a single hostile spectator can DoS every other spectator's chat.",
+      "severity": "minor",
+      "fix": "Issue a real spectatorId per late-joiner (same slot/token machinery) so rate limiting, kick, and moderation target individuals; reserve 'spectator' only as a display label."
+    },
+    {
+      "issue": "GuestSession.reconnect() is under-specified for the case where the Peer itself (not just the DataChannel) lost the broker connection. It re-runs 'the hello handshake using the stored token', but does not say whether it reuses the existing Peer or constructs a fresh Peer with a new random id, nor how it coordinates with the jittered 120s host-retry loop. An implementer can easily write a reconnect that never re-registers with the broker after a network handoff.",
+      "severity": "minor",
+      "fix": "Specify: if peer.disconnected (broker link lost) -> destroy and create a new Peer with a fresh random id, then connect to derivePeerId(code); if only the DataChannel closed -> open a new DataConnection on the live Peer. Unify this with the guest-side host-retry backoff."
+    },
+    {
+      "issue": "NAME_TAKEN is offered as an error code, but names are declared non-unique and keyed internally by playerId. The error can never legitimately fire, and if it did it would contradict the 'Sara (2)' disambiguation behavior — an inconsistency that wastes implementer time.",
+      "severity": "minor",
+      "fix": "Remove NAME_TAKEN from the error enum, or repurpose it as a soft warning that does not block the join."
+    },
+    {
+      "issue": "The '20 simultaneous DTLS/SCTP handshakes on one mobile host is fine because joins are lobby-paced' claim is an untested assumption presented as 'Confirmed viable at 20 players.' Nothing in the spec substantiates the confirmation, and a host losing its radio during the join burst is the failure that kills the party before it starts.",
+      "severity": "minor",
+      "fix": "Add a concrete serialization/backpressure plan (e.g. host accepts at most 2-3 connections concurrently with a small backoff, queueing the rest) and a load test milestone; downgrade 'Confirmed viable' to 'assumed, to be load-tested'."
+    },
+    {
+      "issue": "iOS Safari host suspension is acknowledged but the AUTOMATED mode's clock authority depends on the host staying foreground, and wakeLock is unavailable on older iOS. If the host is also a player (common case), the user is asked to both play and never lock their phone — a UX contradiction that will be hit in the first real game.",
+      "severity": "major",
+      "fix": "Design AUTOMATED mode to tolerate host suspension: on visibilitychange the host fast-forwards any passed deadline by running missed phase transitions, and cap phase deadlines so a suspended host cannot leave the table stuck. State the 'keep screen on' requirement in the host UI and prefer a device likely to stay plugged in; consider recommending moderated mode for no-laptop venues."
+    }
+  ],
+  "strengths": [
+    "Snapshot redaction at SEND time (redactedSnapshotFor computed per recipient, secrets never serialized to guest-bound bytes) is the correct and only robust answer to the hostile-client constraint, and is genuinely a simplification versus client-side encryption or UI obfuscation.",
+    "Full per-recipient redacted snapshots as the single source of truth, with ephemeral lossy events alongside, is the right call at <10KB total state: it removes ack/reorder/gap-recovery code precisely where flaky Wi-Fi would break a delta protocol.",
+    "Pure star topology (one DataChannel per guest, host as authoritative relay) directly follows from both the secrecy constraint and browser/CPU limits; the O(n^2) mesh rejection is correct.",
+    "Absolute host deadlines plus recompute-on-tick/visibilitychange (never accumulate a counter) is exactly how to survive mobile tab throttling, and correctly recognizes that guest countdown accuracy is cosmetic since only the host advances phases.",
+    "Token-based slot rebind via a host-issued 128-bit token never broadcast to peers is a clean, password-free reconnection identity with the right storage choice (sessionStorage, not localStorage, for the token).",
+    "Holding in-game dropped slots open as inert actors preserves role-count and win-condition invariants — a subtle but real correctness win over reassigning roles.",
+    "Crockford Base32 with I/L->1 and O->0 input mapping is the right alphabet for a code read aloud at a table; the 'anm-' namespacing insight (shared global broker id space) is sound even though it conflicts with the locked wording.",
+    "Spectators for late joiners avoid mid-game role-count corruption while keeping the party together; the reconnecting-player token bypass is correctly carve-out from this policy."
+  ],
+  "verdict": "sound-with-fixes"
+}
