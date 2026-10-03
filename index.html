@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>AbuNashmi’s Mafia</title>
+
+    <meta
+      name="description"
+      content="Classic Mafia, played online. Share a six-letter code and play in the browser — no install, no account."
+    />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0a0d14" />
+
+    <!--
+      The Content-Security-Policy is the second line of defence behind the
+      textContent-only rendering rule. `script-src 'self'` means an injected
+      <script> tag cannot execute even if one somehow reached the DOM, and
+      `default-src 'self'` means it could not phone anywhere either.
+
+      connect-src names the PeerJS signalling broker and nothing else: once a
+      data channel is open, game traffic is peer-to-peer and never touches a
+      server at all.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="
+        default-src 'self';
+        script-src 'self';
+        style-src 'self';
+        img-src 'self' data:;
+        font-src 'self';
+        connect-src 'self' wss://0.peerjs.com https://0.peerjs.com;
+        media-src 'none';
+        object-src 'none';
+        base-uri 'none';
+        form-action 'none';
+        frame-ancestors 'none';
+      "
+    />
+
+    <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="assets/icon.svg" />
+    <link rel="stylesheet" href="css/tokens.css" />
+    <link rel="stylesheet" href="css/styles.css" />
+
+    <!--
+      PeerJS is loaded as a CLASSIC script, not an ES module. The vendored build
+      is an IIFE that assigns `window.Peer`; importing it as a module would give
+      an empty namespace object and no constructor.
+
+      `defer` keeps it off the critical path while still guaranteeing it has run
+      before the module entry point, since deferred classic scripts execute in
+      document order ahead of module scripts.
+    -->
+    <script defer src="vendor/peerjs.min.js"></script>
+    <script type="module" src="js/main.js"></script>
+  </head>
+
+  <body>
+    <a class="skip-link" href="#main" data-i18n="a11y.skip">Skip to content</a>
+
+    <noscript>
+      <p class="noscript" data-i18n="app.noScript">
+        This game is played entirely in your browser and needs JavaScript enabled.
+        Turn it on and reload to play.
+      </p>
+    </noscript>
+
+    <!-- ================================================================ -->
+    <!-- Home                                                              -->
+    <!-- ================================================================ -->
+    <main id="screen-home" class="screen screen--home">
+      <header class="brand">
+        <img class="brand__mark" src="assets/icon.svg" alt="" width="72" height="72" />
+        <h1 class="brand__name" data-i18n="app.name">AbuNashmi’s Mafia</h1>
+        <p class="brand__tagline" data-i18n="app.tagline">
+          A game of deduction, for a table of friends.
+        </p>
+      </header>
+
+      <div class="home-tools">
+        <button id="home-lang" class="icon-btn" type="button" aria-label="Switch language">EN</button>
+        <button id="home-mute" class="icon-btn" type="button" aria-label="Mute sound">🔊</button>
+      </div>
+
+      <div class="tabs" role="tablist" data-i18n-aria="home.tabsLabel" aria-label="Start or join a game">
+        <button
+          class="tabs__tab is-active"
+          type="button"
+          role="tab"
+          data-tab="create"
+          aria-selected="true"
+          data-i18n="home.tabCreate"
+        >
+          Create a room
+        </button>
+        <button
+          class="tabs__tab"
+          type="button"
+          role="tab"
+          data-tab="join"
+          aria-selected="false"
+          data-i18n="home.tabJoin"
+        >
+          Join a room
+        </button>
+      </div>
+
+      <!-- ---- create ---- -->
+      <section class="panel card-form" data-tab-panel="create">
+        <form id="form-create" novalidate>
+          <div class="field">
+            <label class="field__label" for="create-name" data-i18n="home.name">Your name</label>
+            <input
+              id="create-name"
+              class="input"
+              type="text"
+              name="name"
+              maxlength="24"
+              autocomplete="nickname"
+              enterkeyhint="go"
+              data-i18n-placeholder="home.namePlaceholder"
+              placeholder="e.g. AbuNashmi"
+              required
+            />
+          </div>
+
+          <label class="check">
+            <input id="create-moderator" type="checkbox" />
+            <span class="check__body">
+              <span class="check__title" data-i18n="home.iModerate">I’ll moderate</span>
+              <span class="check__hint" data-i18n="home.iModerate.hint">
+                You’ll see every role and can steer the game. Leave it off and the
+                game runs itself on timers.
+              </span>
+            </span>
+          </label>
+
+          <button class="btn btn--primary btn--wide" type="submit" data-i18n="home.createBtn">
+            Create room
+          </button>
+          <p class="form-note" data-i18n="home.createNote">
+            A room code appears on the next screen — share it with your table.
+          </p>
+        </form>
+      </section>
+
+      <!-- ---- join ---- -->
+      <section class="panel card-form" data-tab-panel="join" hidden>
+        <form id="form-join" novalidate>
+          <div class="field">
+            <label class="field__label" for="join-name" data-i18n="home.name">Your name</label>
+            <input
+              id="join-name"
+              class="input"
+              type="text"
+              name="name"
+              maxlength="24"
+              autocomplete="nickname"
+              enterkeyhint="next"
+              data-i18n-placeholder="home.namePlaceholder"
+              placeholder="e.g. AbuNashmi"
+              required
+            />
+          </div>
+
+          <div class="field">
+            <label class="field__label" for="join-code" data-i18n="home.roomCode">Room code</label>
+            <input
+              id="join-code"
+              class="input input--code"
+              type="text"
+              name="code"
+              inputmode="text"
+              maxlength="6"
+              autocapitalize="characters"
+              autocomplete="off"
+              spellcheck="false"
+              enterkeyhint="go"
+              data-i18n-placeholder="home.roomCodePlaceholder"
+              placeholder="ABC234"
+              aria-describedby="join-code-hint"
+              required
+            />
+            <p id="join-code-hint" class="field__hint" data-i18n="home.codeHint">
+              Six letters and numbers. The letters I, L, O and the digits 0 and 1
+              are never used, so they’re never needed.
+            </p>
+          </div>
+
+          <label class="check">
+            <input id="join-moderator" type="checkbox" />
+            <span class="check__body">
+              <span class="check__title" data-i18n="home.joinAsMod">Join as moderator</span>
+              <span class="check__hint" data-i18n="home.joinAsMod.hint">
+                Only if the table has asked you to referee.
+              </span>
+            </span>
+          </label>
+
+          <button class="btn btn--primary btn--wide" type="submit" data-i18n="home.joinGo">
+            Join room
+          </button>
+        </form>
+      </section>
+
+      <details class="how">
+        <summary data-i18n="home.how">How to play</summary>
+        <div class="how__body">
+          <p data-i18n="home.how.p1">
+            Everyone at the table is dealt a role in secret. The Mafia picks
+            someone to kill each night; the Doctor protects one person; the
+            Detective learns whether one person is Mafia. Everyone else is a
+            Civilian.
+          </p>
+          <p data-i18n="home.how.p2">
+            By day the table argues and votes. Whoever gets the most votes is
+            eliminated and their role is revealed. The town wins by eliminating
+            every Mafia; the Mafia win when they equal the number of everyone
+            else.
+          </p>
+          <p data-i18n="home.how.p3">
+            Five players is the minimum. Roles are fixed before the first card is
+            turned, and the game publishes a hash at the deal and the matching
+            secret at the end, so anyone can check it afterwards.
+          </p>
+        </div>
+      </details>
+    </main>
+
+    <!-- ================================================================ -->
+    <!-- Room                                                              -->
+    <!-- ================================================================ -->
+    <div id="screen-room" class="screen screen--room" hidden>
+      <div id="room-topbar"></div>
+      <main id="main" class="room">
+        <div id="room-stage" class="room__stage"></div>
+      </main>
+      <div id="room-aside" class="room__aside"></div>
+    </div>
+  </body>
+</html>

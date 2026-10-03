@@ -1097,6 +1097,10 @@ export function projectState(state, viewer) {
     phaseId: state.phaseId,
     isNight: NIGHT_PHASES.has(state.phase),
     round: state.round,
+    // Only once the game is over. Broadcasting the winner mid-game would let a
+    // player infer the roles the moment a win condition was evaluated, which is
+    // the same leak the reveal at ENDED exists to time correctly.
+    win: ended ? state.win : null,
     phaseEndsAt: state.advance?.deadline ?? null,
     advance: state.advance
       ? {
@@ -1110,13 +1114,19 @@ export function projectState(state, viewer) {
     config: {
       hostMode: state.config.hostMode,
       modStyle: state.config.modStyle,
+      // Whether the moderator has a live timer running. Projected because the
+      // moderator panel must show the true arming state, not remember its own
+      // last click: the engine can disarm a timer on a host-mode switch.
+      modTimersArmed: state.config.modTimersArmed,
       mafiaCount: clampMafiaCount(seatedPlayers(state).length, state.config.mafiaCount),
       playerCount: seatedPlayers(state).length,
       firstNightNoKill: state.config.firstNightNoKill,
+      revealSave: state.config.revealSave,
       chatEnabled: state.config.chatEnabled,
       deadCanChat: state.config.deadCanChat,
       liveTally: state.config.liveTally,
       revealOnElimination: state.config.revealOnElimination,
+      durations: { ...state.config.durations },
       vote: { ...state.config.vote },
     },
 
